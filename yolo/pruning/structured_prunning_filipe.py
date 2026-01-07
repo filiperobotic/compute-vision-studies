@@ -89,14 +89,18 @@ def get_gflops_ultralytics(yolo_model, imgsz: int = 640) -> float:
 
 def measure_forward_time_and_mem(yolo_model, imgsz: int = 640, bs: int = 1, warmup_iters: int = 10, measure_iters: int = 100):
     """Measure forward-only time (ms/img) and peak GPU memory (MB) using the underlying torch module."""
-    yolo_model.model.eval()
-
+    # Ensure model and inputs are on the same device/dtype
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
     else:
         device = torch.device("cpu")
 
-    x = torch.rand(bs, 3, imgsz, imgsz, device=device)
+    yolo_model.model.to(device)
+    yolo_model.model.eval()
+
+    # Match input dtype to model weights dtype (e.g., FP16 vs FP32)
+    w_dtype = next(yolo_model.model.parameters()).dtype
+    x = torch.rand(bs, 3, imgsz, imgsz, device=device, dtype=w_dtype)
 
     # Warmup
     with torch.no_grad():
