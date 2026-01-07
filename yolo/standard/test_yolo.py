@@ -5,6 +5,7 @@ import io
 import torch
 from contextlib import redirect_stdout
 import time
+import logging
 
 trained_model_path = '/home/pesquisador/pesquisa/filipe/compute-vision-studies/runs/train/yolo11x__oxford_tower_custom_train/weights/best.pt'
 
@@ -34,7 +35,8 @@ measure_iters = 100
 
 # Power in Watts (set this based on your measurement setup)
 # Example: export POWER_W=6.05
-power_w = float(os.getenv("POWER_W", "0"))
+# power_w = float(os.getenv("POWER_W", "0"))
+power_w = 6.05
 
 # Prepare model + input
 model.model.eval()
@@ -115,20 +117,42 @@ def get_gflops_ultralytics(yolo_model, imgsz: int = 640) -> float:
     except Exception:
         pass
 
-    # 2) Fallback: capture model summary output and parse '... GFLOPs'
-    buf = io.StringIO()
-    with redirect_stdout(buf):
+    # 2) Fallback: Ultralytics often logs via LOGGER (not stdout). Capture logs and parse '... GFLOPs'.
+    txt = ""
+
+    # Try to capture Ultralytics logger output
+    try:
+        from ultralytics.utils import LOGGER  # type: ignore
+        log_buf = io.StringIO()
+        handler = logging.StreamHandler(log_buf)
+        handler.setLevel(logging.INFO)
+
+        # Temporarily attach handler
+        LOGGER.addHandler(handler)
         try:
-            # prints a summary including '... GFLOPs'
             yolo_model.info(imgsz=imgsz)
         except Exception:
-            # older versions may not accept imgsz
             yolo_model.info()
-    txt = buf.getvalue()
+        finally:
+            LOGGER.removeHandler(handler)
+
+        txt = log_buf.getvalue()
+    except Exception:
+        # Last resort: capture stdout (works on some versions)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            try:
+                yolo_model.info(imgsz=imgsz)
+            except Exception:
+                yolo_model.info()
+        txt = buf.getvalue()
 
     m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*GFLOPs", txt)
     if not m:
-        raise RuntimeError("Could not automatically extract GFLOPs from Ultralytics output.")
+        raise RuntimeError(
+            "Could not automatically extract GFLOPs from Ultralytics output. "
+            "Try printing `model.info(imgsz=640)` and checking how it is logged in your environment."
+        )
     return float(m.group(1))
 
 
