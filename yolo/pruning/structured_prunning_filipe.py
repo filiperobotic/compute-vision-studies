@@ -6,7 +6,7 @@ import time
 import logging
 from contextlib import redirect_stdout
 import torch.nn as nn
-import torch.nn.utils.prune as prune
+import torch_pruning as tp
 from utils import metrics
 import os
 
@@ -28,6 +28,17 @@ print(f"Tamanho do arquivo em disco: {original_size:.2f} MB")
 
 model = YOLO(oxford_town_base_model)
 model_nn = model.model
+
+# Fuse (Conv+BN) for inference-style graph (fair comparison)
+try:
+    model.fuse()
+except Exception:
+    try:
+        model.model.fuse()
+    except Exception:
+        pass
+model_nn = model.model
+model_nn.eval()
 
 # -----------------------------
 # Metrics helpers (same as yolo/standard/test_yolo.py)
@@ -200,39 +211,90 @@ print()
 # Same metrics as yolo/standard/test_yolo.py (original model)
 report_ultralytics_metrics(model, oxford_town_base_model, title="METRICS (ORIGINAL MODEL)", imgsz=640)
 
+# -----------------------------
+# CHANNEL PRUNING (real structured pruning)
+# -----------------------------
+# This performs true channel removal (changes tensor shapes), which can reduce Params, GFLOPs,
+# inference time, and checkpoint size.
+
 conv_layers = [(name, module) for name, module in model_nn.named_modules() if isinstance(module, nn.Conv2d)]
 
 print("=" * 60)
-print("APLICANDO PRUNING ESTRUTURAL")
+print("APLICANDO PRUNING POR CANAL (CHANNEL PRUNING)")
 print("=" * 60)
 print(f"Total de camadas Conv2d encontradas: {len(conv_layers)}")
 
-# Pulando as duas primeiras e duas últimas camadas Conv2d foi obtido melhores resultados no mAP
+# Skip early/late layers (often hurts accuracy a lot)
 skip_first = 2
 skip_last = 2
+prune_ratio = 0.30
+min_channels = 8
 
-for idx, (name, module) in enumerate(conv_layers):
+# Device for dependency graph build
+if torch.cuda.is_available():
+    dg_device = torch.device("cuda:0")
+else:
+    dg_device = torch.device("cpu")
+
+model_nn.to(dg_device)
+model_nn.eval()
+
+# Example input for dependency graph (must match model input)
+example_inputs = torch.randn(1, 3, 640, 640, device=dg_device)
+
+# Build dependency graph
+DG = tp.DependencyGraph().build_dependency(model_nn, example_inputs=example_inputs)
+
+pruned_any = 0
+for idx, (name, conv) in enumerate(conv_layers):
     if idx < skip_first or idx >= len(conv_layers) - skip_last:
         print(f"Pulando camada {name}")
         continue
-    print(f"Aplicando pruning estrutural em {name}")
-    
-    prune.ln_structured(
-        module,                 # camada alvo
-        name='weight',          # parâmetro a ser podado
-        amount=0.3,             # percentual de filtros a remover
-        n=2,                    # norma L2
-        dim=0                   # 0 = remove filtros inteiros (saídas da conv)
-    )
 
-# Removendo os reparametrizadores para consolidar o pruning
-for name, module in model_nn.named_modules():
-    if isinstance(module, nn.Conv2d) and hasattr(module, "weight_orig"):
-        prune.remove(module, 'weight')
+    # Heuristics: skip detection-specific heads / DFL / very small layers
+    lname = name.lower()
+    if "dfl" in lname or "detect" in lname:
+        print(f"Pulando camada (head/dfl) {name}")
+        continue
+
+    out_ch = conv.out_channels
+    if out_ch <= min_channels:
+        print(f"Pulando camada (poucos canais: {out_ch}) {name}")
+        continue
+
+    n_prune = int(out_ch * prune_ratio)
+    # keep at least min_channels
+    if out_ch - n_prune < min_channels:
+        n_prune = max(0, out_ch - min_channels)
+    if n_prune <= 0:
+        print(f"Pulando camada (n_prune=0) {name}")
+        continue
+
+    # Importance: L2 norm per output channel (filter)
+    with torch.no_grad():
+        w = conv.weight.detach()
+        imp = torch.norm(w.reshape(out_ch, -1), p=2, dim=1)
+        prune_idxs = torch.argsort(imp)[:n_prune].tolist()
+
+    print(f"Pruning {n_prune}/{out_ch} canais em {name}")
+
+    try:
+        plan = DG.get_pruning_plan(conv, tp.prune_conv_out_channels, idxs=prune_idxs)
+        plan.exec()
+        pruned_any += 1
+    except Exception as e:
+        print(f"[WARN] Falhou pruning em {name}: {e}")
+
+print(f"Pruning executado em {pruned_any} camadas Conv2d")
+
+# Move back to CPU to free GPU memory before later measurements/models
+model_nn.to("cpu")
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
 # Verifica tamanho após pruning (antes de salvar)
 print("=" * 60)
-print("ESTATÍSTICAS APÓS PRUNING ESTRUTURAL (EM MEMÓRIA)")
+print("ESTATÍSTICAS APÓS PRUNING POR CANAL (EM MEMÓRIA)")
 print("=" * 60)
 
 # Calcula tamanho em memória após pruning
@@ -242,19 +304,35 @@ print(f"Tamanho original em memória: {memory_size_orig:.2f} MB")
 print(f"Diferença em memória: {memory_size_orig - memory_size_pruned:.2f} MB ({((memory_size_orig - memory_size_pruned)/memory_size_orig)*100:.2f}%)")
 print()
 
+# After channel pruning, parameters are physically removed (no sparsity mask)
 total_params_pruned, nonzero_params_pruned = metrics.count_parameters(model_nn)
 print(f"Total de parâmetros: {total_params_pruned:,}")
-print(f"Parâmetros não-zero: {nonzero_params_pruned:,}")
-print(f"Densidade: {(nonzero_params_pruned/total_params_pruned)*100:.2f}%")
-print(f"Parâmetros removidos: {total_params_orig - nonzero_params_pruned:,}")
-print(f"Redução de parâmetros: {((total_params_orig - nonzero_params_pruned)/total_params_orig)*100:.2f}%")
+print(f"Parâmetros removidos: {total_params_orig - total_params_pruned:,}")
+print(f"Redução de parâmetros: {((total_params_orig - total_params_pruned)/total_params_orig)*100:.2f}%")
 print()
 
 output_path = 'test_structured.pt'
 model.save(output_path)
 
+# Move original model off GPU before loading pruned model (fairer peak memory)
+try:
+    model.model.to("cpu")
+except Exception:
+    pass
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
 # Reload pruned weights as a YOLO model and report the same metrics
 pruned_model = YOLO(output_path)
+# Fuse pruned model too (fair comparison)
+try:
+    pruned_model.fuse()
+except Exception:
+    try:
+        pruned_model.model.fuse()
+    except Exception:
+        pass
+
 report_ultralytics_metrics(pruned_model, output_path, title="METRICS (PRUNED MODEL)", imgsz=640)
 
 print("=" * 60)
