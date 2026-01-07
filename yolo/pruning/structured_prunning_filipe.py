@@ -237,10 +237,9 @@ print("=" * 60)
 print(f"Total de camadas Conv2d encontradas: {len(conv_layers)}")
 
 # Skip early/late layers (often hurts accuracy a lot)
-skip_first = 2
-skip_last = 2
 prune_ratio = 0.30
 min_channels = 8
+iterative_steps = 10  # progressive pruning (often required for complex graphs)
 
 # Device for dependency graph build
 if torch.cuda.is_available():
@@ -250,6 +249,12 @@ else:
 
 model_nn.to(dg_device)
 model_nn.eval()
+
+# Torch-Pruning relies on autograd tracing; ensure gradients are enabled
+for p in model_nn.parameters():
+    p.requires_grad_(True)
+# Use train(False) (keeps eval behavior but avoids some inference wrappers)
+model_nn.train(False)
 
 # Example input for dependency graph (must match model input)
 example_inputs = torch.randn(1, 3, 640, 640, device=dg_device)
@@ -310,6 +315,9 @@ pruner = tp.pruner.MetaPruner(
     importance=imp,
     global_pruning=True,
     pruning_ratio=prune_ratio,
+    max_pruning_ratio=0.95,
+    iterative_steps=iterative_steps,
+    round_to=1,
     ignored_layers=ignored_layers,
     forward_fn=_forward_fn,
     output_transform=_output_transform,
@@ -328,10 +336,11 @@ try:
 except Exception as e:
     print(f"[TP][WARN] Could not count base ops/params: {e}")
 
-# Execute one pruning step (applies structural channel removal)
-pruner.step()
-
-print("Pruning step executed.")
+# Execute pruning steps (progressive pruning)
+with torch.enable_grad():
+    for i in range(iterative_steps):
+        pruner.step()
+        print(f"Pruning step {i+1}/{iterative_steps} executed.")
 
 # Count how many Conv2d layers actually changed out_channels
 conv_out_after = {n: m.out_channels for n, m in model_nn.named_modules() if isinstance(m, nn.Conv2d)}
