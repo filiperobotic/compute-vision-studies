@@ -255,12 +255,20 @@ model_nn.eval()
 example_inputs = torch.randn(1, 3, 640, 640, device=dg_device)
 
 # Define forward function and output transform for MetaPruner
-def _forward_fn(model, inputs):
-    return model(inputs)
+# NOTE: Ultralytics YOLO models may return list/tuple/dict; the pruner needs a Tensor-like output.
 
-def _output_transform(output):
-    # For YOLO, output is typically a list or tuple; just return as is or wrap if necessary
-    return output
+def _forward_fn(m, x):
+    return m(x)
+
+
+def _output_transform(out):
+    # Pick a tensor-like output for tracing
+    if isinstance(out, (list, tuple)) and len(out) > 0:
+        return out[0]
+    if isinstance(out, dict):
+        for v in out.values():
+            return v
+    return out
 
 # IMPORTANT: Some torch-pruning versions may not populate DependencyGraph for Ultralytics models
 # when using low-level APIs. The pruner API is more robust.
@@ -295,6 +303,7 @@ example_inputs_tp = (example_inputs,)
 imp = tp.importance.MagnitudeImportance(p=2)
 
 # Use MetaPruner for better compatibility (supports forward_fn / output_transform)
+
 pruner = tp.pruner.MetaPruner(
     model_nn,
     example_inputs=example_inputs,
@@ -308,20 +317,36 @@ pruner = tp.pruner.MetaPruner(
 
 print(f"Ignorando {len(ignored_layers)} camadas (head/depthwise/tiny)")
 
+# Snapshot conv out_channels before pruning
+conv_out_before = {n: m.out_channels for n, m in model_nn.named_modules() if isinstance(m, nn.Conv2d)}
+
+# Try to count baseline ops/params using torch-pruning utils (if available)
+try:
+    from torch_pruning import utils as tp_utils
+    base_macs, base_params = tp_utils.count_ops_and_params(model_nn, example_inputs)
+    print(f"[TP] Base MACs: {base_macs/1e9:.3f} G, Base Params: {base_params/1e6:.3f} M")
+except Exception as e:
+    print(f"[TP][WARN] Could not count base ops/params: {e}")
+
 # Execute one pruning step (applies structural channel removal)
 pruner.step()
 
-# Count how many Conv2d layers changed out_channels (rough indicator)
-pruned_any = 0
-for n, m in model_nn.named_modules():
-    if isinstance(m, nn.Conv2d):
-        # if pruned, out_channels typically changes and will often no longer match original checkpoints
-        # (we don't have per-layer originals here, so just count layers > min_channels)
-        pruned_any += 1
-
 print("Pruning step executed.")
 
-print(f"Pruning executado (pruner.step). Conv2d layers present after pruning: {pruned_any}")
+# Count how many Conv2d layers actually changed out_channels
+conv_out_after = {n: m.out_channels for n, m in model_nn.named_modules() if isinstance(m, nn.Conv2d)}
+changed = sum(1 for n, oc0 in conv_out_before.items() if conv_out_after.get(n, oc0) != oc0)
+print(f"[Sanity] Conv2d layers with changed out_channels: {changed}")
+
+# Try to count post ops/params
+try:
+    from torch_pruning import utils as tp_utils
+    macs, params = tp_utils.count_ops_and_params(model_nn, example_inputs)
+    print(f"[TP] Post MACs: {macs/1e9:.3f} G, Post Params: {params/1e6:.3f} M")
+except Exception as e:
+    print(f"[TP][WARN] Could not count post ops/params: {e}")
+
+print(f"Pruning executado (pruner.step). Conv2d layers changed: {changed}")
 
 # Sanity check: print a few Conv2d out_channels after pruning
 try:
