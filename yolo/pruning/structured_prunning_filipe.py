@@ -198,6 +198,17 @@ def report_ultralytics_metrics(yolo_model, weights_path: str, title: str, imgsz:
     print("=" * 60)
     print()
 
+def _output_transform(output):
+    """Pick a tensor-like output for tracing (YOLO may return tuple/list/dict)."""
+    if isinstance(output, (list, tuple)):
+        # Return first element (usually predictions)
+        return output[0]
+    if isinstance(output, dict):
+        # Return first value
+        for v in output.values():
+            return v
+    return output
+
 # Calcula tamanho do modelo original em memória
 memory_size_orig = metrics.get_model_memory_size(model_nn)
 print(f"Tamanho em memória (RAM): {memory_size_orig:.2f} MB")
@@ -243,6 +254,14 @@ model_nn.eval()
 # Example input for dependency graph (must match model input)
 example_inputs = torch.randn(1, 3, 640, 640, device=dg_device)
 
+# Define forward function and output transform for MetaPruner
+def _forward_fn(model, inputs):
+    return model(inputs)
+
+def _output_transform(output):
+    # For YOLO, output is typically a list or tuple; just return as is or wrap if necessary
+    return output
+
 # IMPORTANT: Some torch-pruning versions may not populate DependencyGraph for Ultralytics models
 # when using low-level APIs. The pruner API is more robust.
 if not hasattr(tp, "pruner") or not hasattr(tp, "importance"):
@@ -275,13 +294,16 @@ example_inputs_tp = (example_inputs,)
 # Magnitude-based channel pruning (L2) on output channels
 imp = tp.importance.MagnitudeImportance(p=2)
 
-# Global pruning ratio applied across the network
-pruner = tp.pruner.MagnitudePruner(
+# Use MetaPruner for better compatibility (supports forward_fn / output_transform)
+pruner = tp.pruner.MetaPruner(
     model_nn,
-    example_inputs=example_inputs_tp,
+    example_inputs=example_inputs,
     importance=imp,
+    global_pruning=True,
     pruning_ratio=prune_ratio,
     ignored_layers=ignored_layers,
+    forward_fn=_forward_fn,
+    output_transform=_output_transform,
 )
 
 print(f"Ignorando {len(ignored_layers)} camadas (head/depthwise/tiny)")
