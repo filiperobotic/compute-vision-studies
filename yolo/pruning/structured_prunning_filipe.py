@@ -7,6 +7,7 @@ import logging
 from contextlib import redirect_stdout
 import torch.nn as nn
 import torch_pruning as tp
+print(f"[torch-pruning] version: {getattr(tp, '__version__', 'unknown')}")
 from utils import metrics
 import os
 
@@ -279,13 +280,29 @@ for idx, (name, conv) in enumerate(conv_layers):
     print(f"Pruning {n_prune}/{out_ch} canais em {name}")
 
     try:
-        plan = DG.get_pruning_plan(conv, tp.prune_conv_out_channels, idxs=prune_idxs)
-        plan.exec()
+        # torch-pruning API changed across versions.
+        # Newer versions use `get_pruning_group(...).prune()`, older ones may have `get_pruning_plan(...).exec()`.
+        if hasattr(DG, "get_pruning_plan"):
+            plan = DG.get_pruning_plan(conv, tp.prune_conv_out_channels, idxs=prune_idxs)
+            plan.exec()
+        elif hasattr(DG, "get_pruning_group"):
+            group = DG.get_pruning_group(conv, tp.prune_conv_out_channels, idxs=prune_idxs)
+            group.prune()
+        else:
+            raise AttributeError("DependencyGraph has neither get_pruning_plan nor get_pruning_group")
+
         pruned_any += 1
     except Exception as e:
         print(f"[WARN] Falhou pruning em {name}: {e}")
 
 print(f"Pruning executado em {pruned_any} camadas Conv2d")
+
+# Sanity check: print a few Conv2d out_channels after pruning
+try:
+    sample_convs = [(n, m.out_channels) for n, m in model_nn.named_modules() if isinstance(m, nn.Conv2d)][:5]
+    print("[Sanity] First Conv2d out_channels after pruning:", sample_convs)
+except Exception as e:
+    print(f"[Sanity][WARN] Could not list conv channels: {e}")
 
 # Move back to CPU to free GPU memory before later measurements/models
 model_nn.to("cpu")
