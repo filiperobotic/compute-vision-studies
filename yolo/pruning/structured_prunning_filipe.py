@@ -243,59 +243,63 @@ model_nn.eval()
 # Example input for dependency graph (must match model input)
 example_inputs = torch.randn(1, 3, 640, 640, device=dg_device)
 
-# Build dependency graph
-DG = tp.DependencyGraph().build_dependency(model_nn, example_inputs=example_inputs)
+# IMPORTANT: Some torch-pruning versions may not populate DependencyGraph for Ultralytics models
+# when using low-level APIs. The pruner API is more robust.
+if not hasattr(tp, "pruner") or not hasattr(tp, "importance"):
+    raise RuntimeError(
+        "Your installed torch-pruning version does not expose tp.pruner / tp.importance. "
+        "Please upgrade: pip install -U torch-pruning"
+    )
 
+# Build an ignore list (depthwise convs and detection head parts are usually unsafe)
+ignored_layers = []
+for n, m in model_nn.named_modules():
+    if isinstance(m, nn.Conv2d):
+        lname = n.lower()
+        # Skip head/DFL/detect modules
+        if "dfl" in lname or "detect" in lname:
+            ignored_layers.append(m)
+            continue
+        # Skip depthwise convs (groups == in == out)
+        if m.groups == m.in_channels and m.in_channels == m.out_channels:
+            ignored_layers.append(m)
+            continue
+        # Skip tiny convs
+        if m.out_channels <= min_channels:
+            ignored_layers.append(m)
+            continue
+
+# Example inputs must be a tuple for torch-pruning pruners
+example_inputs_tp = (example_inputs,)
+
+# Magnitude-based channel pruning (L2) on output channels
+imp = tp.importance.MagnitudeImportance(p=2)
+
+# Global pruning ratio applied across the network
+pruner = tp.pruner.MagnitudePruner(
+    model_nn,
+    example_inputs=example_inputs_tp,
+    importance=imp,
+    pruning_ratio=prune_ratio,
+    ignored_layers=ignored_layers,
+)
+
+print(f"Ignorando {len(ignored_layers)} camadas (head/depthwise/tiny)")
+
+# Execute one pruning step (applies structural channel removal)
+pruner.step()
+
+# Count how many Conv2d layers changed out_channels (rough indicator)
 pruned_any = 0
-for idx, (name, conv) in enumerate(conv_layers):
-    if idx < skip_first or idx >= len(conv_layers) - skip_last:
-        print(f"Pulando camada {name}")
-        continue
-
-    # Heuristics: skip detection-specific heads / DFL / very small layers
-    lname = name.lower()
-    if "dfl" in lname or "detect" in lname:
-        print(f"Pulando camada (head/dfl) {name}")
-        continue
-
-    out_ch = conv.out_channels
-    if out_ch <= min_channels:
-        print(f"Pulando camada (poucos canais: {out_ch}) {name}")
-        continue
-
-    n_prune = int(out_ch * prune_ratio)
-    # keep at least min_channels
-    if out_ch - n_prune < min_channels:
-        n_prune = max(0, out_ch - min_channels)
-    if n_prune <= 0:
-        print(f"Pulando camada (n_prune=0) {name}")
-        continue
-
-    # Importance: L2 norm per output channel (filter)
-    with torch.no_grad():
-        w = conv.weight.detach()
-        imp = torch.norm(w.reshape(out_ch, -1), p=2, dim=1)
-        prune_idxs = torch.argsort(imp)[:n_prune].tolist()
-
-    print(f"Pruning {n_prune}/{out_ch} canais em {name}")
-
-    try:
-        # torch-pruning API changed across versions.
-        # Newer versions use `get_pruning_group(...).prune()`, older ones may have `get_pruning_plan(...).exec()`.
-        if hasattr(DG, "get_pruning_plan"):
-            plan = DG.get_pruning_plan(conv, tp.prune_conv_out_channels, idxs=prune_idxs)
-            plan.exec()
-        elif hasattr(DG, "get_pruning_group"):
-            group = DG.get_pruning_group(conv, tp.prune_conv_out_channels, idxs=prune_idxs)
-            group.prune()
-        else:
-            raise AttributeError("DependencyGraph has neither get_pruning_plan nor get_pruning_group")
-
+for n, m in model_nn.named_modules():
+    if isinstance(m, nn.Conv2d):
+        # if pruned, out_channels typically changes and will often no longer match original checkpoints
+        # (we don't have per-layer originals here, so just count layers > min_channels)
         pruned_any += 1
-    except Exception as e:
-        print(f"[WARN] Falhou pruning em {name}: {e}")
 
-print(f"Pruning executado em {pruned_any} camadas Conv2d")
+print("Pruning step executed.")
+
+print(f"Pruning executado (pruner.step). Conv2d layers present after pruning: {pruned_any}")
 
 # Sanity check: print a few Conv2d out_channels after pruning
 try:
