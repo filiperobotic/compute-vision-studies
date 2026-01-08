@@ -426,11 +426,15 @@ def iterative_prune(args):
                 ignored_layers.append(m)
 
         # importance
-        if args.importance.lower() == "l2":
-            importance = tp.importance.GroupNormImportance()  # usado no tutorial
-        else:
-            # fallback: L2 também
+        # importance (torch-pruning API muda entre versões)
+        if hasattr(tp.importance, "GroupNormImportance"):
             importance = tp.importance.GroupNormImportance()
+        elif hasattr(tp.importance, "GroupTaylorImportance"):
+            importance = tp.importance.GroupTaylorImportance()
+        elif hasattr(tp.importance, "MagnitudeImportance"):
+            importance = tp.importance.MagnitudeImportance(p=2)  # L2 magnitude
+        else:
+            raise RuntimeError(f"Nenhuma importance compatível encontrada. Disponíveis: {dir(tp.importance)}")
 
         # pruner (GroupNormPruner)  [oai_citation:7‡Freedium](https://freedium-mirror.cfd/https%3A//medium.com/%40antonioconsiglio/how-to-prune-yolov10-with-iterative-pruning-and-torch-pruning-library-full-guide-0cded392389e)
         pruner = tp.pruner.GroupNormPruner(
