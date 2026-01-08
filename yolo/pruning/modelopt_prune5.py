@@ -353,6 +353,8 @@ def train_baseline(args) -> str:
     print("\n==============================")
     print("STAGE 1: Train baseline from scratch")
     print("==============================\n")
+    print(f"[DEBUG] CWD: {os.getcwd()}")
+    print(f"[DEBUG] data.yaml (abs): {os.path.abspath(args.data)}")
 
     y = YOLO(args.model)
     results = y.train(
@@ -364,9 +366,10 @@ def train_baseline(args) -> str:
         device=args.device,
         project=args.project,
         name=args.name_baseline,
-        # pretrained=True,
-        # exist_ok=True,
-        warmup_epochs=0,
+        pretrained=True,
+        exist_ok=True,
+        optimizer="auto",
+        seed=0,
     )
 
     save_dir = getattr(results, "save_dir", None) or (Path(args.project) / args.name_baseline)
@@ -417,8 +420,10 @@ def prune_and_finetune(args, baseline_best: str) -> str:
         project=args.project,
         name=args.name_pruned,
         trainer=PrunedTrainer,
-        # exist_ok=True,
-        warmup_epochs=0,
+        pretrained=True,
+        exist_ok=True,
+        optimizer="auto",
+        seed=0,
     )
 
     save_dir = getattr(results, "save_dir", None) or (Path(args.project) / args.name_pruned)
@@ -470,7 +475,7 @@ def parse_args():
     p.add_argument("--ft-epochs", type=int, default=50, help="fine-tune epochs after pruning")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--device", type=str, default=None)
+    p.add_argument("--device", type=str, default="0")
 
     p.add_argument("--flops-target", type=str, default="66%", help="FastNAS FLOPs target (e.g., 66%)")
 
