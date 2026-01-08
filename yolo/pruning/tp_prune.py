@@ -17,6 +17,7 @@ import torch.nn as nn
 
 import torch_pruning as tp
 from ultralytics import YOLO
+from ultralytics.cfg import DEFAULT_CFG
 
 # ---------------------------
 # Metrics helpers (iguais ao seu estilo)
@@ -321,7 +322,12 @@ def make_inmemory_trainer(base_trainer_cls, inmem_model: nn.Module):
     """
     class InMemoryTrainer(base_trainer_cls):
         def __init__(self, cfg=None, overrides=None, _callbacks=None):
+            # Ultralytics expects a cfg dict/path; passing None breaks get_cfg().
             self._inmem_model = inmem_model
+            if cfg is None:
+                cfg = DEFAULT_CFG  # safe default
+            elif cfg == "default":
+                cfg = DEFAULT_CFG
             super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
 
         def get_model(self, cfg=None, weights=None, verbose=True):
