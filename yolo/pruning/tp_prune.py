@@ -372,10 +372,13 @@ def iterative_prune(args):
     replace_c2f_with_c2f_v2(model.model, mods)
 
     # baseline (val)
-    baseline = deepcopy(model)
+    baseline = YOLO(args.model)
     metric0 = baseline.val(**val_kwargs)
     init_map = float(metric0.box.map)
     init_map50 = float(metric0.box.map50)
+    del baseline
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # baseline ops/params
     example_inputs = torch.randn(1, 3, args.imgsz, args.imgsz).to(model.device)
@@ -462,8 +465,9 @@ def iterative_prune(args):
         pruner.step()
 
         # valida “pré-finetune”
-        pre_val = deepcopy(model)
-        metric_pre = pre_val.val(**val_kwargs)
+        metric_pre = model.val(**val_kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         pruned_map = float(metric_pre.box.map)
         pruned_macs, pruned_nparams = tp.utils.count_ops_and_params(model.model, example_inputs.to(model.device))
         speedup = float(macs_list[0]) / float(pruned_macs)
@@ -481,8 +485,9 @@ def iterative_prune(args):
         model.train(trainer=InMemTrainer, **train_kwargs_step)
 
         # pós-finetune: valida
-        post_val = deepcopy(model)
-        metric_post = post_val.val(**val_kwargs)
+        metric_post = model.val(**val_kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         cur_map = float(metric_post.box.map)
         cur_map50 = float(metric_post.box.map50)
 
