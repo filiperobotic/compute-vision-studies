@@ -12,7 +12,7 @@ IMG_SIZE = int(os.getenv("IMG_SIZE", "640"))
 
 FLOPS_TARGET = os.getenv("FLOPS_TARGET", "66%")          # guia usa "66%"  [oai_citation:3‡Yasin's Keep](https://y-t-g.github.io/tutorials/yolo-prune/)
 MAX_ITER_DATALOADER = int(os.getenv("MAX_ITER_DATALOADER", "20"))  # guia cita 20 (50 recomendado, mas RAM)  [oai_citation:4‡Yasin's Keep](https://y-t-g.github.io/tutorials/yolo-prune/)
-FINETUNE_EPOCHS = int(os.getenv("FINETUNE_EPOCHS", "10"))
+FINETUNE_EPOCHS = int(os.getenv("FINETUNE_EPOCHS", "100"))
 POWER_W = float(os.getenv("POWER_W", "6.05"))
 
 # --------- METRICS (copiadas do seu script atual) ---------
@@ -257,6 +257,14 @@ def main():
 
     if pruned_best is None or not os.path.exists(pruned_best):
         raise RuntimeError("Could not find pruned best.pt after training.")
+
+    # após o treino, antes de carregar pruned_model
+    try:
+        model.model.to("cpu")
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     pruned_model = YOLO(pruned_best)
     try:
