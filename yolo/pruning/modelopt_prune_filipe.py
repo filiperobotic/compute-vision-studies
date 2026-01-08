@@ -183,6 +183,13 @@ def main():
     import math
 
     class PrunedTrainer(model.task_map[model.task]["trainer"]):
+        # Ultralytics may call final_eval() at the end of training even when val=False.
+        # With ModelOpt pruning, final_eval loads the checkpoint via AutoBackend and can fail restoring
+        # modelopt_state with strict=True ("Inconsistent keys in config"). We skip final_eval here.
+        def final_eval(self):
+            print("[INFO] Skipping Ultralytics final_eval() (avoids ModelOpt restore strictness error).")
+            return
+
         def _setup_train(self):
             super()._setup_train()
 
@@ -252,7 +259,7 @@ def main():
         imgsz=IMG_SIZE,
         val=False,
     )
-    print("[INFO] Training completed with val=False (skipped Ultralytics final_eval).")
+    print("[INFO] Training completed (final_eval was overridden to no-op).")
 
     # find best.pt
     save_dir = getattr(train_res, "save_dir", None)
@@ -272,15 +279,16 @@ def main():
     if pruned_best is None or not os.path.exists(pruned_best):
         raise RuntimeError("Could not find pruned best.pt after training.")
 
-    # após o treino, antes de carregar pruned_model
-    try:
-        model.model.to("cpu")
-    except Exception:
-        pass
+    # After training, clear any cached allocations before benchmarking.
+    # NOTE: we keep the trained/pruned model in memory (we do NOT move it to CPU) because we benchmark it next.
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    pruned_model = YOLO(pruned_best)
+    # IMPORTANT: avoid re-loading the pruned checkpoint here.
+    # Loading can trigger ModelOpt restore_from_modelopt_state(strict=True) and fail with
+    # "Inconsistent keys in config" depending on Ultralytics/ModelOpt versions.
+    # Instead, use the in-memory trained/pruned `model` object.
+    pruned_model = model
     try:
         pruned_model.fuse()
     except Exception:
