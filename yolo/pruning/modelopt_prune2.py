@@ -59,52 +59,65 @@ class YOLOPruner:
         print(f"\nCriando modelo com {prune_ratio*100:.0f}% de redução...")
         
         # Detecta o modelo base (n, s, m, l, x)
-        model_name = self.original_model_path.split('/')[-1]
+        model_name = self.original_model_path.split('/')[-1].lower()
         
         # Mapa de modelos e seus width_multiple
         width_map = {
-            'yolo11n': 0.25,
-            'yolo11s': 0.50,
-            'yolo11m': 0.75,
-            'yolo11l': 1.0,
-            'yolo11x': 1.25,
+            'n': ('yolo11n.pt', 0.25),
+            's': ('yolo11s.pt', 0.50),
+            'm': ('yolo11m.pt', 0.75),
+            'l': ('yolo11l.pt', 1.0),
+            'x': ('yolo11x.pt', 1.25),
         }
         
-        # Identifica o modelo base
-        base_model = None
-        for key in width_map.keys():
-            if key in model_name.lower():
-                base_model = key
+        # Identifica o tamanho do modelo
+        model_size = 'n'  # default
+        for size_key in ['n', 's', 'm', 'l', 'x']:
+            if f'11{size_key}' in model_name or f'v11{size_key}' in model_name:
+                model_size = size_key
                 break
         
-        if base_model is None:
-            base_model = 'yolo11n'  # Fallback
+        base_model_name, original_width = width_map[model_size]
         
         # Calcula novo width_multiple
-        original_width = width_map[base_model]
         new_width = original_width * (1 - prune_ratio)
         
-        # Carrega modelo base e modifica width
-        from ultralytics.nn.tasks import DetectionModel
+        print(f"  Modelo base: YOLO11{model_size.upper()}")
+        print(f"  Width original: {original_width}")
+        print(f"  Width reduzido: {new_width:.3f}")
         
-        # Cria configuração customizada
-        cfg_dict = {
-            'nc': self.model.model.nc,  # número de classes
-            'scales': {
-                'pruned': {
-                    'depth': self.model.model.yaml.get('depth_multiple', 0.33),
-                    'width': new_width
-                }
-            }
-        }
+        # Mapeia para modelo mais próximo
+        # Se redução de 30% no X (1.25), fica ~0.875, próximo do L (1.0)
+        closest_model = self._find_closest_model(new_width, width_map)
         
-        # Cria modelo com nova arquitetura
-        new_model = YOLO(f'{base_model}.yaml')
+        print(f"  Usando como base: {closest_model}")
         
-        # Ajusta width manualmente
-        self._scale_model_width(new_model.model, new_width)
+        # Carrega modelo mais próximo
+        new_model = YOLO(closest_model)
         
         return new_model
+    
+    def _find_closest_model(self, target_width, width_map):
+        """
+        Encontra o modelo pré-treinado mais próximo do width target
+        
+        Args:
+            target_width: Width desejado
+            width_map: Dicionário com modelos disponíveis
+            
+        Returns:
+            Nome do modelo mais próximo
+        """
+        closest_model = None
+        min_diff = float('inf')
+        
+        for size, (model_name, width) in width_map.items():
+            diff = abs(width - target_width)
+            if diff < min_diff:
+                min_diff = diff
+                closest_model = model_name
+        
+        return closest_model
     
     def _scale_model_width(self, model, width_scale):
         """
@@ -319,7 +332,7 @@ if __name__ == "__main__":
     MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"
     PRUNE_RATIO = 0.30  # 30% de redução
-    FINETUNE_EPOCHS = 30
+    FINETUNE_EPOCHS = 30d
     OUTPUT_PATH = "yolo11x_pruned.pt"
     
     print("=" * 60)
@@ -395,7 +408,7 @@ if __name__ == "__main__":
     print(f"  Prune Ratio:   {PRUNE_RATIO*100:.0f}%")
     
     print(f"\n📦 TAMANHO:")
-    print(f"  Original:      {original_size:.2sf} MB")
+    print(f"  Original:      {original_size:.2f} MB")
     print(f"  Pruned:        {pruned_size:.2f} MB")
     print(f"  Redução:       {(1 - pruned_size/original_size)*100:.2f}%")
     
