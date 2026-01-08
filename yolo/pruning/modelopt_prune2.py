@@ -11,9 +11,15 @@ Requisitos:
 
 NOTA: Se encontrar erros de "Inconsistent keys in config", tente:
     1. Deletar checkpoints antigos: rm modelopt_*.pth
-    2. Usar target menos agressivo (ex: 75% ao invés de 66%)
+    2. Usar target menos agressivo (ex: 80% ao invés de 66%)
     3. Reduzir max_iter_data_loader (ex: 10 ao invés de 20)
     4. Usar modelo menor (yolo11m ou yolo11s ao invés de yolo11x)
+    
+TARGETS RECOMENDADOS POR MODELO:
+    - YOLOv11n/s: 50-60% (pruning agressivo funciona bem)
+    - YOLOv11m:   60-70% (pruning moderado)
+    - YOLOv11l:   70-80% (pruning conservador)
+    - YOLOv11x:   80-85% (muito conservador - modelo já é grande)
 """
 
 import torch
@@ -97,10 +103,13 @@ class PrunedTrainer:
                         return metrics.fitness
                 
                 # Configurações de pruning
-                # Você pode ajustar para "30%", "50%", "66%", etc.
-                prune_constraints = {"flops": "66%"}
+                # Para YOLO11X, targets mais realistas são 80-85%
+                # Para modelos menores, pode usar 60-70%
+                prune_constraints = {"flops": "80%"}
                 
                 LOGGER.info(f"Target de pruning: {prune_constraints}")
+                LOGGER.info("NOTA: Para YOLOv11X, targets muito agressivos (<75%) podem falhar")
+                LOGGER.info("      Use modelos menores (M, S, N) para pruning mais agressivo")
                 
                 # Desabilita fusing (necessário para subnet search)
                 self.model.is_fused = lambda: True
@@ -113,42 +122,20 @@ class PrunedTrainer:
                 # Aplica pruning
                 LOGGER.info("Executando subnet search (pode demorar)...")
                 
-                try:
-                    self.model, prune_results = mtp.prune(
-                        model=self.model,
-                        mode="fastnas",
-                        constraints=prune_constraints,
-                        dummy_input=dummy_input,
-                        config={
-                            "score_func": score_func,
-                            "checkpoint": "modelopt_fastnas_search_checkpoint.pth",
-                            "data_loader": self.train_loader,
-                            "collect_func": collect_func,
-                            "max_iter_data_loader": 20,  # Use 50 para melhores resultados (requer mais RAM)
-                            "verbose": 2,  # Mais logs para debug
-                        },
-                    )
-                except Exception as e:
-                    LOGGER.error(f"Erro durante pruning: {e}")
-                    LOGGER.info("Tentando com configuração alternativa...")
-                    
-                    # Tenta com configuração mais conservadora
-                    prune_constraints = {"flops": "75%"}  # Menos agressivo
-                    
-                    self.model, prune_results = mtp.prune(
-                        model=self.model,
-                        mode="fastnas",
-                        constraints=prune_constraints,
-                        dummy_input=dummy_input,
-                        config={
-                            "score_func": score_func,
-                            "checkpoint": "modelopt_fastnas_search_checkpoint_alt.pth",
-                            "data_loader": self.train_loader,
-                            "collect_func": collect_func,
-                            "max_iter_data_loader": 10,
-                            "verbose": 2,
-                        },
-                    )
+                self.model, prune_results = mtp.prune(
+                    model=self.model,
+                    mode="fastnas",
+                    constraints=prune_constraints,
+                    dummy_input=dummy_input,
+                    config={
+                        "score_func": score_func,
+                        "checkpoint": "modelopt_fastnas_search_checkpoint.pth",
+                        "data_loader": self.train_loader,
+                        "collect_func": collect_func,
+                        "max_iter_data_loader": 20,  # Use 50 para melhores resultados (requer mais RAM)
+                        "verbose": 2,  # Mais logs para debug
+                    },
+                )
                 
                 LOGGER.info("="*60)
                 LOGGER.info("Pruning aplicado com sucesso!")
@@ -349,11 +336,12 @@ def compare_models(original_path, pruned_path, data_yaml="coco128.yaml"):
 # Exemplo de uso
 if __name__ == "__main__":
     # Configurações
-    MODEL_PATH = "yolo11m.pt"
+    MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
-    BATCH_SIZE = 16
-    FLOPS_TARGET = "66%"  # Pode testar 30%, 50%, 66%
+    BATCH_SIZE = 16d
+    FLOPS_TARGET = "80%"  # Para YOLO11X, use 80-85% (mais conservador)
+                          # Para YOLO11M/S/N, pode usar 60-70%
     
     # 1. Treina com pruning
     print("\n" + "="*70)
@@ -367,7 +355,7 @@ if __name__ == "__main__":
         batch=BATCH_SIZE,
         flops_target=FLOPS_TARGET,
         project="runs/prune",
-        name="yolo11m_pruned"
+        name="yolo11x_pruned"
     )
     
     # 2. Avalia modelo pruned
@@ -375,7 +363,7 @@ if __name__ == "__main__":
     print("ETAPA 2: AVALIAÇÃO DO MODELO PRUNED")
     print("="*70)
     
-    pruned_model_path = "runs/prune/yolo11m_pruned/weights/best.pt"
+    pruned_model_path = "runs/prune/yolo11x_pruned/weights/best.pt"
     metrics = evaluate_pruned_model(pruned_model_path, DATA_YAML)
     
     # 3. Compara com original
@@ -399,9 +387,10 @@ if __name__ == "__main__":
     print(f"     model = YOLO('{pruned_model_path}')")
     print("")
     print("  3. Ajuste FLOPS_TARGET para diferentes níveis de compressão:")
-    print("     - 30%: Mais agressivo (menor modelo, maior perda)")
-    print("     - 50%: Balanceado")
-    print("     - 66%: Conservador (recomendado para começar)")
+    print("     YOLOv11n/s: 50-60% (agressivo)")
+    print("     YOLOv11m:   60-70% (moderado)")  
+    print("     YOLOv11l:   70-80% (conservador)")
+    print("     YOLOv11x:   80-85% (muito conservador)")
     print("")
     print("  4. IMPORTANTE: Use seu dataset completo para melhores resultados")
     print(f"     (este exemplo usa {DATA_YAML} apenas para demonstração)")
