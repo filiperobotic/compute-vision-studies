@@ -182,6 +182,24 @@ def main():
     from ultralytics.utils.torch_utils import ModelEMA
     import math
 
+    # ------------------------------------------------------------------
+    # Workaround: Ultralytics reloads the best checkpoint at the end of training.
+    # ModelOpt restore may fail with "Inconsistent keys in config" under strict=True.
+    # The error message suggests using strict=False. We monkeypatch ModelOpt select()
+    # to always use strict=False during restore.
+    # ------------------------------------------------------------------
+    try:
+        import modelopt.torch.nas.utils as _mnas_utils
+        _orig_select = _mnas_utils.select
+
+        def _select_nonstrict(model, config, strict=True):
+            return _orig_select(model, config, strict=False)
+
+        _mnas_utils.select = _select_nonstrict
+        print("[ModelOpt] Patched modelopt.torch.nas.utils.select(strict=False) for checkpoint restore.")
+    except Exception as e:
+        print(f"[WARN] Could not patch ModelOpt select(strict=False): {e}")
+
     class PrunedTrainer(model.task_map[model.task]["trainer"]):
         # Ultralytics may call final_eval() at the end of training even when val=False.
         # With ModelOpt pruning, final_eval loads the checkpoint via AutoBackend and can fail restoring
