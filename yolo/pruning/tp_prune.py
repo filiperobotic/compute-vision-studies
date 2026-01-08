@@ -231,6 +231,8 @@ class C2f_v2(nn.Module):
         CIB = mods.get("CIB", None)
 
         self.c = int(c2 * e)
+        # Keep Ultralytics-compatible attribute name used by some utilities
+        self.c_ = self.c
         self.cv0 = Conv(c1, self.c, 1, 1)
         self.cv1 = Conv(c1, self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
@@ -297,6 +299,12 @@ def replace_c2f_with_c2f_v2(module: nn.Module, mods):
 
             new_mod = C2f_v2(c1, c2, n=n, shortcut=shortcut, g=g, e=e, mods=mods, is_CIB=is_CIB, lk=lk)
             transfer_c2f_weights(child, new_mod)
+
+            # Ultralytics graph metadata (required by tasks.py _predict_once)
+            for attr in ("i", "f", "type", "np", "n"):
+                if hasattr(child, attr):
+                    setattr(new_mod, attr, getattr(child, attr))
+
             setattr(module, name, new_mod)
         else:
             replace_c2f_with_c2f_v2(child, mods)
