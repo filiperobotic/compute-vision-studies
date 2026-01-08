@@ -425,14 +425,18 @@ def iterative_prune(args):
                ("PSA" in mods and isinstance(m, mods["PSA"])):
                 ignored_layers.append(m)
 
-        # importance
         # importance (torch-pruning API muda entre versões)
-        if hasattr(tp.importance, "GroupNormImportance"):
-            importance = tp.importance.GroupNormImportance()
+        # For iterative pruning, prefer a gradient-free criterion (L2 magnitude) to avoid requiring backward().
+        if hasattr(tp.importance, "MagnitudeImportance"):
+            importance = tp.importance.MagnitudeImportance(p=2)  # L2 magnitude (no grads needed)
+        elif hasattr(tp.importance, "GroupNormImportance"):
+            importance = tp.importance.GroupNormImportance()     # may be gradient-free depending on version
         elif hasattr(tp.importance, "GroupTaylorImportance"):
-            importance = tp.importance.GroupTaylorImportance()
-        elif hasattr(tp.importance, "MagnitudeImportance"):
-            importance = tp.importance.MagnitudeImportance(p=2)  # L2 magnitude
+            raise RuntimeError(
+                "Your torch-pruning version only offers GroupTaylorImportance (needs gradients), "
+                "but this script does not run backward() before pruning. "
+                "Install/enable MagnitudeImportance or adjust the script to compute grads." 
+            )
         else:
             raise RuntimeError(f"Nenhuma importance compatível encontrada. Disponíveis: {dir(tp.importance)}")
 
@@ -448,6 +452,7 @@ def iterative_prune(args):
         )
 
         # aplica pruning
+        print(f"[INFO] Using importance: {importance.__class__.__name__}")
         pruner.step()
 
         # valida “pré-finetune”
