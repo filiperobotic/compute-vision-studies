@@ -129,13 +129,11 @@ def main():
     if not os.path.exists(WEIGHTS):
         raise FileNotFoundError(f"weights not found: {WEIGHTS}")
 
-    model = YOLO(WEIGHTS)
-    try:
-        model.fuse()
-    except Exception:
-        pass
+    # IMPORTANT: do NOT fuse the model BEFORE ModelOpt pruning/training.
+    # Fusing changes module structure and can make ModelOpt's saved subnet_config inconsistent on reload.
+    model = YOLO(WEIGHTS)  # training/pruning model (unfused)
 
-    # baseline stats
+    # baseline stats (unfused model object)
     orig_nn = model.model
     memory_size_orig = metrics.get_model_memory_size(orig_nn)
     total_params_orig, _ = metrics.count_parameters(orig_nn)
@@ -146,7 +144,23 @@ def main():
     print(f"Checkpoint size: {metrics.get_model_size(WEIGHTS):.2f} MB")
     print(f"RAM size (rough): {memory_size_orig:.2f} MB")
     print(f"Params: {total_params_orig:,}")
-    report_ultralytics_metrics(model, WEIGHTS, "METRICS (ORIGINAL MODEL)", imgsz=IMG_SIZE)
+
+    # Report baseline metrics using a fused copy (fairer inference timing) without affecting pruning/training model
+    model_eval = YOLO(WEIGHTS)
+    try:
+        model_eval.fuse()
+    except Exception:
+        pass
+    report_ultralytics_metrics(model_eval, WEIGHTS, "METRICS (ORIGINAL MODEL)", imgsz=IMG_SIZE)
+
+    # free GPU cache from the eval model before pruning/training
+    try:
+        model_eval.model.to("cpu")
+    except Exception:
+        pass
+    del model_eval
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Ultralytics ModelOpt/QAT integration may require newer PyTorch.
     # Your traceback showed: AssertionError: QAT requires PyTorch>=2.6
