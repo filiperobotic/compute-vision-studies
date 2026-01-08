@@ -204,20 +204,30 @@ def main():
     # _SearchSpaceUnwrapped.select(...) during restore. Patch it to be non-strict and non-fatal.
     try:
         import modelopt.torch.opt.dynamic as _mdyn
-        _orig_ss_selsect = _mdyn._SearchSpaceUnwrapped.select
+        _orig_ss_select = _mdyn._SearchSpaceUnwrapped.select
 
         def _ss_select_nonstrict(self, config, strict=True):
+            # Force strict=False and never crash training on restore mismatch.
             try:
                 return _orig_ss_select(self, config, strict=False)
             except RuntimeError as e:
-                print("[WARN] ModelOpt restore select() failed; continuing without strict restore.")
+                print("[WARN] ModelOpt restore select() failed (non-fatal); continuing without strict restore.")
                 print(f"       {e}")
-                return
+                return None
 
         _mdyn._SearchSpaceUnwrapped.select = _ss_select_nonstrict
         print("[ModelOpt] Patched _SearchSpaceUnwrapped.select(strict=False, non-fatal) for checkpoint restore.")
     except Exception as e:
         print(f"[WARN] Could not patch _SearchSpaceUnwrapped.select: {e}")
+
+    # Sanity: show which functions are currently bound (helps debugging)
+    try:
+        import modelopt.torch.nas.utils as _mnas_utils
+        import modelopt.torch.opt.dynamic as _mdyn
+        print(f"[ModelOpt] select func: {_mnas_utils.select}")
+        print(f"[ModelOpt] _SearchSpaceUnwrapped.select func: {_mdyn._SearchSpaceUnwrapped.select}")
+    except Exception as _e:
+        print(f"[WARN] Could not print ModelOpt patched function refs: {_e}")
 
     class PrunedTrainer(model.task_map[model.task]["trainer"]):
         # Ultralytics may call final_eval() at the end of training even when val=False.
