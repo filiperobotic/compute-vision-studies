@@ -497,7 +497,7 @@ if __name__ == "__main__":
             pass
     
     # Configurações
-    MODEL_PATH = "yolo11m.pt"
+    MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
     BATCH_SIZE = 16
@@ -575,21 +575,21 @@ if __name__ == "__main__":
     print("✅ PROCESSO COMPLETO!")
     print("="*70)
     
-    print("\n💡 PRÓXIMOS PASSOS:")
-    print("  1. Exporte para TensorRT FP16 para ganhos de velocidade:")
-    print("     pruned_model.export(format='engine', half=True)")
-    print("")
-    print("  2. Para carregar o modelo pruned posteriormente:")
-    print("     from ultralytics import YOLO")
-    print(f"     model = YOLO('{pruned_model_path}')")
-    print("")
-    print("  3. Ajuste FLOPS_TARGET para diferentes níveis de compressão:")
-    print("     YOLOv11n/s: 50-60% (agressivo)")
-    print("     YOLOv11m:   60-70% (moderado)")  
-    print("     YOLOv11l:   70-80% (conservador)")
-    print("     YOLOv11x:   80-85% (muito conservador)")
-    print("")
-    print("  4. IMPORTANTE: Use seu dataset completo para melhores resultados")
-    print(f"     (este exemplo usa {DATA_YAML} apenas para demonstração)")
+    # print("\n💡 PRÓXIMOS PASSOS:")
+    # print("  1. Exporte para TensorRT FP16 para ganhos de velocidade:")
+    # print("     pruned_model.export(format='engine', half=True)")
+    # print("")
+    # print("  2. Para carregar o modelo pruned posteriormente:")
+    # print("     from ultralytics import YOLO")
+    # print(f"     model = YOLO('{pruned_model_path}')")
+    # print("")
+    # print("  3. Ajuste FLOPS_TARGET para diferentes níveis de compressão:")
+    # print("     YOLOv11n/s: 50-60% (agressivo)")
+    # print("     YOLOv11m:   60-70% (moderado)")  
+    # print("     YOLOv11l:   70-80% (conservador)")
+    # print("     YOLOv11x:   80-85% (muito conservador)")
+    # print("")
+    # print("  4. IMPORTANTE: Use seu dataset completo para melhores resultados")
+    # print(f"     (este exemplo usa {DATA_YAML} apenas para demonstração)")
     
-    print("\n" + "="*70)
+    # print("\n" + "="*70)
