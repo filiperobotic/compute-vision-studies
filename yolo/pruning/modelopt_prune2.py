@@ -3,9 +3,17 @@ Pruning YOLOv11 com NVIDIA Model Optimizer
 
 Baseado em: https://y-t-g.github.io/tutorials/yolo-prune/
 
+IMPORTANTE: Este código requer a branch especial do Ultralytics com suporte ao ModelOpt.
+
 Requisitos:
     pip install nvidia-modelopt[torch]
     pip install git+https://github.com/ultralytics/ultralytics@qat-nvidia
+
+NOTA: Se encontrar erros de "Inconsistent keys in config", tente:
+    1. Deletar checkpoints antigos: rm modelopt_*.pth
+    2. Usar target menos agressivo (ex: 75% ao invés de 66%)
+    3. Reduzir max_iter_data_loader (ex: 10 ao invés de 20)
+    4. Usar modelo menor (yolo11m ou yolo11s ao invés de yolo11x)
 """
 
 import torch
@@ -39,12 +47,24 @@ class PrunedTrainer:
                 """
                 Setup modificado que aplica pruning antes do treinamento
                 """
+                import os
+                
                 # Chama setup original
                 super()._setup_train()
                 
                 LOGGER.info("="*60)
                 LOGGER.info("Iniciando processo de pruning com NVIDIA ModelOpt...")
                 LOGGER.info("="*60)
+                
+                # Remove checkpoints antigos que podem causar conflitos
+                checkpoint_files = [
+                    "modelopt_fastnas_search_checkpoint.pth",
+                    "modelopt_fastnas_search_checkpoint_alt.pth"
+                ]
+                for ckpt_file in checkpoint_files:
+                    if os.path.exists(ckpt_file):
+                        os.remove(ckpt_file)
+                        LOGGER.info(f"Removido checkpoint antigo: {ckpt_file}")
                 
                 # Função para coletar batches
                 def collect_func(batch):
@@ -93,19 +113,42 @@ class PrunedTrainer:
                 # Aplica pruning
                 LOGGER.info("Executando subnet search (pode demorar)...")
                 
-                self.model, prune_results = mtp.prune(
-                    model=self.model,
-                    mode="fastnas",
-                    constraints=prune_constraints,
-                    dummy_input=dummy_input,
-                    config={
-                        "score_func": score_func,
-                        "checkpoint": "modelopt_fastnas_search_checkpoint.pth",
-                        "data_loader": self.train_loader,
-                        "collect_func": collect_func,
-                        "max_iter_data_loader": 20,  # Use 50 para melhores resultados (requer mais RAM)
-                    },
-                )
+                try:
+                    self.model, prune_results = mtp.prune(
+                        model=self.model,
+                        mode="fastnas",
+                        constraints=prune_constraints,
+                        dummy_input=dummy_input,
+                        config={
+                            "score_func": score_func,
+                            "checkpoint": "modelopt_fastnas_search_checkpoint.pth",
+                            "data_loader": self.train_loader,
+                            "collect_func": collect_func,
+                            "max_iter_data_loader": 20,  # Use 50 para melhores resultados (requer mais RAM)
+                            "verbose": 2,  # Mais logs para debug
+                        },
+                    )
+                except Exception as e:
+                    LOGGER.error(f"Erro durante pruning: {e}")
+                    LOGGER.info("Tentando com configuração alternativa...")
+                    
+                    # Tenta com configuração mais conservadora
+                    prune_constraints = {"flops": "75%"}  # Menos agressivo
+                    
+                    self.model, prune_results = mtp.prune(
+                        model=self.model,
+                        mode="fastnas",
+                        constraints=prune_constraints,
+                        dummy_input=dummy_input,
+                        config={
+                            "score_func": score_func,
+                            "checkpoint": "modelopt_fastnas_search_checkpoint_alt.pth",
+                            "data_loader": self.train_loader,
+                            "collect_func": collect_func,
+                            "max_iter_data_loader": 10,
+                            "verbose": 2,
+                        },
+                    )
                 
                 LOGGER.info("="*60)
                 LOGGER.info("Pruning aplicado com sucesso!")
@@ -303,10 +346,10 @@ def compare_models(original_path, pruned_path, data_yaml="coco128.yaml"):
     print("\n" + "="*70)
 
 
-# Exemplo de usod
+# Exemplo de uso
 if __name__ == "__main__":
     # Configurações
-    MODEL_PATH = "yolo11x.pt"
+    MODEL_PATH = "yolo11m.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
     BATCH_SIZE = 16
@@ -324,7 +367,7 @@ if __name__ == "__main__":
         batch=BATCH_SIZE,
         flops_target=FLOPS_TARGET,
         project="runs/prune",
-        name="yolo11x_pruned"
+        name="yolo11m_pruned"
     )
     
     # 2. Avalia modelo pruned
@@ -332,7 +375,7 @@ if __name__ == "__main__":
     print("ETAPA 2: AVALIAÇÃO DO MODELO PRUNED")
     print("="*70)
     
-    pruned_model_path = "runs/prune/yolo11x_pruned/weights/best.pt"
+    pruned_model_path = "runs/prune/yolo11m_pruned/weights/best.pt"
     metrics = evaluate_pruned_model(pruned_model_path, DATA_YAML)
     
     # 3. Compara com original
