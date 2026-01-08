@@ -8,7 +8,7 @@ from collections import OrderedDict
 import torch
 import math
 
-model = YOLO("yolov8m.pt")
+model = YOLO("yolov11m.pt")
 
 class PrunedTrainer(model.task_map[model.task]["trainer"]):
   def _setup_train(self):
@@ -74,7 +74,7 @@ results = model.train(data="data.yaml", trainer=PrunedTrainer, epochs=50, exist_
 pruned_model = YOLO("runs/detect/train/weights/best.pt")
 
 # Original FLOPs
-model = YOLO("yolov8m.pt")
+model = YOLO("yolov11m.pt")
 model.info()
 
 # Pruned FLOPs
@@ -86,8 +86,8 @@ pruned_model.export(format="engine", half=True)
 pruned_model = YOLO("runs/detect/train/weights/best.engine")
 results = pruned_model.val(data="data.yaml", verbose=False)
 
-model = YOLO("yolov8m.pt")
+model = YOLO("yolov11m.pt")
 model.export(format="engine", half=True)
-model = YOLO("yolov8m.engine")
+model = YOLO("yolov11m.engine")
 
 results = model.val(data="data.yaml", verbose=False)
