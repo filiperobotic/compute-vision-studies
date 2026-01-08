@@ -301,7 +301,9 @@ def train_with_pruning(
             trainer=pruned_trainer,
             project=project,
             name=name,
-            verbose=True
+            verbose=True,
+            optimizer='AdamW',  # Força AdamW ao invés de 'auto'
+            lr0=0.001,  # Learning rate específico
         )
     except RuntimeError as e:
         if "Inconsistent keys in config" in str(e):
@@ -575,12 +577,12 @@ if __name__ == "__main__":
     print("✅ PROCESSO COMPLETO!")
     print("="*70)
     
-    # print("\n💡 PRÓXIMOS PASSOS:")
-    # print("  1. Exporte para TensorRT FP16 para ganhos de velocidade:")
-    # print("     pruned_model.export(format='engine', half=True)")
-    # print("")
-    # print("  2. Para carregar o modelo pruned posteriormente:")
-    # print("     from ultralytics import YOLO")
+    print("\n💡 PRÓXIMOS PASSOS:")
+    print("  1. Exporte para TensorRT FP16 para ganhos de velocidade:")
+    print("     pruned_model.export(format='engine', half=True)")
+    print("")
+    print("  2. Para carregar o modelo pruned posteriormente:")
+    print("     from ultralytics import YOLO")
     # print(f"     model = YOLO('{pruned_model_path}')")
     # print("")
     # print("  3. Ajuste FLOPS_TARGET para diferentes níveis de compressão:")
@@ -592,4 +594,4 @@ if __name__ == "__main__":
     # print("  4. IMPORTANTE: Use seu dataset completo para melhores resultados")
     # print(f"     (este exemplo usa {DATA_YAML} apenas para demonstração)")
     
-    # print("\n" + "="*70)
+    print("\n" + "="*70)
