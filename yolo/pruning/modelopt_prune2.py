@@ -332,7 +332,7 @@ if __name__ == "__main__":
     MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"
     PRUNE_RATIO = 0.30  # 30% de redução
-    FINETUNE_EPOCHS = 30d
+    FINETUNE_EPOCHS = 30
     OUTPUT_PATH = "yolo11x_pruned.pt"
     
     print("=" * 60)
