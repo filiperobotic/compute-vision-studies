@@ -102,7 +102,7 @@ def extract_gflops(yolo: YOLO, imgsz: int) -> float:
     except Exception:
         txt = ""
 
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*GFLOPs",e txt)
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*GFLOPs", txt)
     if not m:
         raise RuntimeError("Could not extract GFLOPs from Ultralytics output.")
     return float(m.group(1))
