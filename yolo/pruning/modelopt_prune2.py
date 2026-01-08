@@ -2,264 +2,163 @@ import torch
 import torch.nn as nn
 from ultralytics import YOLO
 import numpy as np
-from copy import deepcopy
-import yaml
+import copy
 
 class YOLOPruner:
     """
-    Classe para realizar pruning estruturado em modelos YOLOv11 via sparse training
+    Pruning estruturado para YOLOv11 usando torch.nn.utils.prune
     """
     def __init__(self, model_path, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        """
-        Inicializa o pruner
-        
-        Args:
-            model_path: Caminho para o modelo YOLOv11
-            device: Dispositivo para executar (cuda/cpu)
-        """
         self.device = device
         self.model = YOLO(model_path)
-        self.original_model_path = model_path
         self.model.to(device)
+        self.original_state = copy.deepcopy(self.model.model.state_dict())
         
-    def create_sparse_model_config(self, original_model, prune_ratio=0.3):
+    def calculate_channel_importance(self, module):
         """
-        Cria configuração para modelo esparso baseado no original
+        Calcula importância de cada canal usando norma L1
+        """
+        if isinstance(module, nn.Conv2d):
+            weight = module.weight.data
+            # Importância = soma absoluta dos pesos de cada filtro
+            importance = torch.sum(torch.abs(weight.view(weight.size(0), -1)), dim=1)
+            return importance.cpu().numpy()
+        return None
+    
+    def apply_structured_pruning(self, prune_ratio=0.3, skip_layers=None):
+        """
+        Aplica pruning estruturado zerando canais menos importantes
         
         Args:
-            original_model: Modelo YOLO original
-            prune_ratio: Ratio de redução de canais
-            
-        Returns:
-            Dicionário com nova configuração
+            prune_ratio: Percentual de canais a zerar
+            skip_layers: Lista de nomes de camadas a ignorar
         """
-        # Extrai configuração do modelo original
-        model_cfg = original_model.model.yaml
+        if skip_layers is None:
+            skip_layers = []
         
-        # Calcula novo width_multiple
-        original_width = model_cfg.get('width_multiple', 1.0)
-        new_width = original_width * (1 - prune_ratio)
+        print(f"\n{'='*60}")
+        print(f"APLICANDO PRUNING ESTRUTURADO (Ratio: {prune_ratio:.1%})")
+        print(f"{'='*60}")
         
-        # Cria nova configuração
-        new_cfg = deepcopy(model_cfg)
-        new_cfg['width_multiple'] = new_width
+        total_params_before = sum(p.numel() for p in self.model.model.parameters())
+        pruned_count = 0
         
-        return new_cfg
-    
-    def create_pruned_model(self, prune_ratio=0.3):
-        """
-        Cria um novo modelo com arquitetura reduzida
-        
-        Args:
-            prune_ratio: Percentual de redução (0-1)
-            
-        Returns:
-            Novo modelo YOLO com menos canais
-        """
-        print(f"\nCriando modelo com {prune_ratio*100:.0f}% de redução...")
-        
-        # Detecta o modelo base (n, s, m, l, x)
-        model_name = self.original_model_path.split('/')[-1].lower()
-        
-        # Mapa de modelos e seus width_multiple
-        width_map = {
-            'n': ('yolo11n.pt', 0.25),
-            's': ('yolo11s.pt', 0.50),
-            'm': ('yolo11m.pt', 0.75),
-            'l': ('yolo11l.pt', 1.0),
-            'x': ('yolo11x.pt', 1.25),
-        }
-        
-        # Identifica o tamanho do modelo
-        model_size = 'n'  # default
-        for size_key in ['n', 's', 'm', 'l', 'x']:
-            if f'11{size_key}' in model_name or f'v11{size_key}' in model_name:
-                model_size = size_key
-                break
-        
-        base_model_name, original_width = width_map[model_size]
-        
-        # Calcula novo width_multiple
-        new_width = original_width * (1 - prune_ratio)
-        
-        print(f"  Modelo base: YOLO11{model_size.upper()}")
-        print(f"  Width original: {original_width}")
-        print(f"  Width reduzido: {new_width:.3f}")
-        
-        # Mapeia para modelo mais próximo
-        # Se redução de 30% no X (1.25), fica ~0.875, próximo do L (1.0)
-        closest_model = self._find_closest_model(new_width, width_map)
-        
-        print(f"  Usando como base: {closest_model}")
-        
-        # Carrega modelo mais próximo
-        new_model = YOLO(closest_model)
-        
-        return new_model
-    
-    def _find_closest_model(self, target_width, width_map):
-        """
-        Encontra o modelo pré-treinado mais próximo do width target
-        
-        Args:
-            target_width: Width desejado
-            width_map: Dicionário com modelos disponíveis
-            
-        Returns:
-            Nome do modelo mais próximo
-        """
-        closest_model = None
-        min_diff = float('inf')
-        
-        for size, (model_name, width) in width_map.items():
-            diff = abs(width - target_width)
-            if diff < min_diff:
-                min_diff = diff
-                closest_model = model_name
-        
-        return closest_model
-    
-    def _scale_model_width(self, model, width_scale):
-        """
-        Ajusta manualmente o width_multiple do modelo
-        """
-        if hasattr(model, 'yaml'):
-            model.yaml['width_multiple'] = width_scale
-    
-    def transfer_weights(self, source_model, target_model):
-        """
-        Transfere pesos do modelo original para o modelo reduzido
-        usando critério de importância (norma L1)
-        
-        Args:
-            source_model: Modelo original (maior)
-            target_model: Modelo reduzido (menor)
-        """
-        print("\nTransferindo pesos importantes do modelo original...")
-        
-        source_layers = list(source_model.model.modules())
-        target_layers = list(target_model.model.modules())
-        
-        transferred = 0
-        
-        for src_module, tgt_module in zip(source_layers, target_layers):
-            if isinstance(src_module, nn.Conv2d) and isinstance(tgt_module, nn.Conv2d):
-                # Verifica se as dimensões são compatíveis para transferência parcial
-                src_out = src_module.out_channels
-                tgt_out = tgt_module.out_channels
-                src_in = src_module.in_channels
-                tgt_in = tgt_module.in_channels
+        # Aplica pruning a cada camada Conv2d
+        for name, module in self.model.model.named_modules():
+            if isinstance(module, nn.Conv2d):
+                # Verifica se deve pular esta camada
+                should_skip = any(skip in name for skip in skip_layers)
                 
-                if tgt_out <= src_out and tgt_in <= src_in:
-                    # Calcula importância dos filtros de saída
-                    weight = src_module.weight.data.cpu().numpy()
-                    importance_out = np.sum(np.abs(weight), axis=(1, 2, 3))
-                    
-                    # Seleciona os top-k filtros mais importantes
-                    top_indices_out = np.argsort(importance_out)[-tgt_out:]
-                    top_indices_out = np.sort(top_indices_out)
-                    
-                    # Para canais de entrada, calcula importância
-                    importance_in = np.sum(np.abs(weight), axis=(0, 2, 3))
-                    top_indices_in = np.argsort(importance_in)[-tgt_in:]
-                    top_indices_in = np.sort(top_indices_in)
-                    
-                    # Transfere pesos selecionados
-                    selected_weight = weight[top_indices_out][:, top_indices_in]
-                    tgt_module.weight.data = torch.from_numpy(selected_weight).to(self.device).contiguous()
-                    
-                    # Transfere bias se existir
-                    if src_module.bias is not None and tgt_module.bias is not None:
-                        selected_bias = src_module.bias.data.cpu().numpy()[top_indices_out]
-                        tgt_module.bias.data = torch.from_numpy(selected_bias).to(self.device).contiguous()
-                    
-                    transferred += 1
-            
-            elif isinstance(src_module, nn.BatchNorm2d) and isinstance(tgt_module, nn.BatchNorm2d):
-                # Transfere BatchNorm
-                src_features = src_module.num_features
-                tgt_features = tgt_module.num_features
+                # Não fazer pruning em camadas muito pequenas ou do detection head
+                if should_skip or module.out_channels <= 16 or 'detect' in name.lower():
+                    continue
                 
-                if tgt_features <= src_features:
-                    # Calcula importância baseada no peso do BatchNorm
-                    bn_weight = src_module.weight.data.cpu().numpy()
-                    importance = np.abs(bn_weight)
-                    top_indices = np.argsort(importance)[-tgt_features:]
-                    top_indices = np.sort(top_indices)
-                    
-                    # Transfere parâmetros
-                    tgt_module.weight.data = torch.from_numpy(bn_weight[top_indices]).to(self.device).contiguous()
-                    
-                    bn_bias = src_module.bias.data.cpu().numpy()
-                    tgt_module.bias.data = torch.from_numpy(bn_bias[top_indices]).to(self.device).contiguous()
-                    
-                    running_mean = src_module.running_mean.data.cpu().numpy()
-                    tgt_module.running_mean.data = torch.from_numpy(running_mean[top_indices]).to(self.device).contiguous()
-                    
-                    running_var = src_module.running_var.data.cpu().numpy()
-                    tgt_module.running_var.data = torch.from_numpy(running_var[top_indices]).to(self.device).contiguous()
+                importance = self.calculate_channel_importance(module)
+                if importance is None:
+                    continue
+                
+                num_channels = len(importance)
+                num_prune = int(num_channels * prune_ratio)
+                
+                if num_prune == 0:
+                    continue
+                
+                # Índices dos canais menos importantes
+                threshold_idx = np.argsort(importance)[num_prune]
+                threshold = importance[threshold_idx]
+                
+                # Cria máscara (0 para canais fracos, 1 para fortes)
+                mask = (importance > threshold).astype(np.float32)
+                mask_tensor = torch.from_numpy(mask).to(self.device)
+                
+                # Aplica máscara aos pesos (zera canais fracos)
+                with torch.no_grad():
+                    module.weight.data *= mask_tensor.view(-1, 1, 1, 1)
+                    if module.bias is not None:
+                        module.bias.data *= mask_tensor
+                
+                kept = int(mask.sum())
+                pruned_count += 1
+                print(f"  {name:40s} → {kept:3d}/{num_channels:3d} canais ({kept/num_channels*100:5.1f}%)")
         
-        print(f"✓ Transferidos pesos de {transferred} camadas convolucionais")
+        total_params_after = sum(p.numel() for p in self.model.model.parameters())
+        
+        # Calcula esparsidade real (quantos pesos são zero)
+        zero_params = sum((p == 0).sum().item() for p in self.model.model.parameters())
+        sparsity = zero_params / total_params_after * 100
+        
+        print(f"\n{'='*60}")
+        print(f"✓ Pruning aplicado em {pruned_count} camadas")
+        print(f"  Parâmetros totais: {total_params_after:,}")
+        print(f"  Parâmetros zerados: {zero_params:,} ({sparsity:.2f}%)")
+        print(f"{'='*60}\n")
+        
+        return {
+            'pruned_layers': pruned_count,
+            'total_params': total_params_after,
+            'zero_params': zero_params,
+            'sparsity': sparsity
+        }
     
-    def apply_pruning(self, prune_ratio=0.3):
+    def iterative_pruning(self, target_sparsity=0.5, steps=5, data_yaml=None, 
+                          finetune_epochs=5, skip_layers=None):
         """
-        Aplica pruning criando novo modelo com arquitetura reduzida
+        Pruning iterativo com fine-tuning entre etapas
         
         Args:
-            prune_ratio: Percentual de redução (0-1)
-            
-        Returns:
-            Estatísticas do pruning
+            target_sparsity: Esparsidade final desejada (0-1)
+            steps: Número de etapas de pruning
+            data_yaml: Dataset para fine-tuning
+            finetune_epochs: Épocas de fine-tuning por etapa
+            skip_layers: Camadas a não fazer pruning
         """
-        print("\n" + "=" * 60)
-        print("INICIANDO PRUNING ESTRUTURADO")
-        print("=" * 60)
+        print(f"\n{'='*60}")
+        print(f"PRUNING ITERATIVO")
+        print(f"  Target sparsity: {target_sparsity:.1%}")
+        print(f"  Steps: {steps}")
+        print(f"  Fine-tune epochs per step: {finetune_epochs}")
+        print(f"{'='*60}")
         
-        # Conta parâmetros do modelo original
-        original_model = self.model
-        params_before = sum(p.numel() for p in original_model.model.parameters())
+        # Calcula ratio por etapa (gradual pruning)
+        prune_ratio_per_step = 1 - (1 - target_sparsity) ** (1/steps)
         
-        # Cria modelo reduzido
-        pruned_model = self.create_pruned_model(prune_ratio)
-        
-        # Transfere pesos importantes
-        self.transfer_weights(original_model.model, pruned_model.model)
-        
-        # Substitui modelo
-        self.model = pruned_model
-        self.model.to(self.device)
-        
-        # Conta parâmetros do modelo reduzido
-        params_after = sum(p.numel() for p in self.model.model.parameters())
-        
-        reduction = (1 - params_after / params_before) * 100
-        
-        stats = {
-            'params_before': params_before,
-            'params_after': params_after,
-            'reduction_percent': reduction
-        }
-        
-        print(f"\n✓ Pruning aplicado com sucesso!")
-        print(f"  Parâmetros: {params_before:,} → {params_after:,}")
-        print(f"  Redução: {reduction:.2f}%")
-        print("=" * 60)
+        for step in range(steps):
+            print(f"\n{'='*60}")
+            print(f"STEP {step+1}/{steps}")
+            print(f"{'='*60}")
+            
+            # Aplica pruning
+            stats = self.apply_structured_pruning(
+                prune_ratio=prune_ratio_per_step,
+                skip_layers=skip_layers
+            )
+            
+            # Fine-tuning se dataset fornecido
+            if data_yaml and finetune_epochs > 0:
+                print(f"\nFine-tuning por {finetune_epochs} épocas...")
+                self.model.train(
+                    data=data_yaml,
+                    epochs=finetune_epochs,
+                    batch=16,
+                    device=self.device,
+                    verbose=False,
+                    patience=10
+                )
+                
+                # Avalia
+                metrics = self.evaluate(data_yaml)
+                print(f"mAP50 após step {step+1}: {metrics.box.map50:.4f}")
         
         return stats
     
     def fine_tune(self, data_yaml, epochs=30, imgsz=640, batch=16, patience=20):
         """
         Fine-tuning do modelo após pruning
-        
-        Args:
-            data_yaml: Caminho para arquivo YAML do dataset
-            epochs: Número de épocas
-            imgsz: Tamanho da imagem
-            batch: Tamanho do batch
-            patience: Early stopping patience
         """
-        print(f"\nIniciando fine-tuning por até {epochs} épocas...")
-        print(f"Early stopping: {patience} épocas sem melhoria")
+        print(f"\n{'='*60}")
+        print(f"FINE-TUNING FINAL")
+        print(f"{'='*60}")
+        print(f"Epochs: {epochs}, Batch: {batch}, Patience: {patience}")
         
         results = self.model.train(
             data=data_yaml,
@@ -276,54 +175,73 @@ class YOLOPruner:
         )
         return results
     
-    def evaluate(self, data_yaml, imgsz=640):
+    def evaluate(self, data_yaml, imgsz=640, verbose=False):
         """
         Avalia o modelo
         """
-        print("\nAvaliando modelo...")
+        if verbose:
+            print("\nAvaliando modelo...")
+        
         metrics = self.model.val(
             data=data_yaml,
             imgsz=imgsz,
             device=self.device,
+            verbose=verbose,
             plots=False
         )
         return metrics
     
-    def get_model_size(self):
+    def remove_pruning_reparameterization(self):
         """
-        Calcula o tamanho do modelo em MB
+        Remove os hooks de pruning e torna as máscaras permanentes
         """
-        param_size = 0
-        for param in self.model.model.parameters():
-            param_size += param.nelement() * param.element_size()
-        
-        buffer_size = 0
-        for buffer in self.model.model.buffers():
-            buffer_size += buffer.nelement() * buffer.element_size()
-        
-        size_mb = (param_size + buffer_size) / 1024 / 1024
-        return size_mb
+        for module in self.model.model.modules():
+            if isinstance(module, nn.Conv2d):
+                # Remove reparametrização do pruning se existir
+                if hasattr(module, 'weight_orig'):
+                    # Torna os pesos "pruned" permanentes
+                    module.weight = nn.Parameter(module.weight.data)
+                    del module.weight_orig
+                    del module.weight_mask
     
-    def count_parameters(self):
+    def export_sparse_model(self, output_path):
         """
-        Conta o número de parâmetros do modelo
+        Exporta modelo esparso (com zeros)
         """
-        return sum(p.numel() for p in self.model.model.parameters())
+        self.remove_pruning_reparameterization()
+        self.model.save(output_path)
+        print(f"\n✓ Modelo esparso salvo: {output_path}")
+    
+    def get_model_info(self):
+        """
+        Retorna informações sobre o modelo
+        """
+        total_params = sum(p.numel() for p in self.model.model.parameters())
+        zero_params = sum((p == 0).sum().item() for p in self.model.model.parameters())
+        nonzero_params = total_params - zero_params
+        sparsity = zero_params / total_params * 100
+        
+        # Calcula tamanho em MB
+        param_size = sum(p.nelement() * p.element_size() 
+                        for p in self.model.model.parameters())
+        buffer_size = sum(b.nelement() * b.element_size() 
+                         for b in self.model.model.buffers())
+        size_mb = (param_size + buffer_size) / 1024 / 1024
+        
+        return {
+            'total_params': total_params,
+            'zero_params': zero_params,
+            'nonzero_params': nonzero_params,
+            'sparsity': sparsity,
+            'size_mb': size_mb
+        }
     
     def save_pruned_model(self, output_path):
         """
-        Salva o modelo com pruning
+        Salva modelo com pruning
         """
         self.model.save(output_path)
-        print(f"\n✓ Modelo salvo em: {output_path}")
-    
-    def export_onnx(self, output_path='model_pruned.onnx', imgsz=640):
-        """
-        Exporta modelo para ONNX
-        """
-        print(f"\nExportando para ONNX: {output_path}")
-        self.model.export(format='onnx', imgsz=imgsz, dynamic=False)
-        print("✓ Exportação concluída")
+        print(f"\n✓ Modelo salvo: {output_path}")
 
 
 # Exemplo de uso
@@ -331,98 +249,114 @@ if __name__ == "__main__":
     # Configurações
     MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"
-    PRUNE_RATIO = 0.30  # 30% de redução
-    FINETUNE_EPOCHS = 30
+    PRUNE_RATIO = 0.5  # 50% de esparsidade
+    FINETUNE_EPOCHS = 50
     OUTPUT_PATH = "yolo11x_pruned.pt"
     
-    print("=" * 60)
-    print("YOLO PRUNING - Redução de Modelo via Arquitetura")
-    print("=" * 60)
+    print("="*70)
+    print("YOLO PRUNING - Pruning Estruturado com Fine-tuning")
+    print("="*70)
     
     # Criar pruner
     pruner = YOLOPruner(MODEL_PATH)
     
     # Informações do modelo original
-    print("\n" + "=" * 60)
+    print("\n" + "="*70)
     print("MODELO ORIGINAL")
-    print("=" * 60)
-    original_params = pruner.count_parameters()
-    original_size = pruner.get_model_size()
-    print(f"Parâmetros: {original_params:,}")
-    print(f"Tamanho: {original_size:.2f} MB")
+    print("="*70)
+    original_info = pruner.get_model_info()
+    print(f"Parâmetros totais: {original_info['total_params']:,}")
+    print(f"Tamanho: {original_info['size_mb']:.2f} MB")
     
     # Avaliar modelo original
     print("\n📊 Avaliando modelo original...")
-    original_metrics = pruner.evaluate(DATA_YAML)
+    original_metrics = pruner.evaluate(DATA_YAML, verbose=True)
     original_map50 = original_metrics.box.map50
     print(f"mAP50: {original_map50:.4f}")
     
-    # Aplicar pruning
-    pruning_stats = pruner.apply_pruning(prune_ratio=PRUNE_RATIO)
+    # Método 1: Pruning único
+    print("\n" + "="*70)
+    print("MÉTODO 1: PRUNING ÚNICO")
+    print("="*70)
     
-    # Informações do modelo com pruning
-    print("\n" + "=" * 60)
-    print("MODELO COM PRUNING (antes do fine-tuning)")
-    print("=" * 60)
-    pruned_params = pruner.count_parameters()
-    pruned_size = pruner.get_model_size()
-    print(f"Parâmetros: {pruned_params:,}")
-    print(f"Tamanho: {pruned_size:.2f} MB")
-    print(f"Redução de parâmetros: {(1 - pruned_params/original_params)*100:.2f}%")
-    print(f"Redução de tamanho: {(1 - pruned_size/original_size)*100:.2f}%")
+    stats = pruner.apply_structured_pruning(
+        prune_ratio=PRUNE_RATIO,
+        skip_layers=['model.22']  # Pula detection head
+    )
     
-    # Avaliar modelo após pruning (antes do fine-tuning)
-    print("\n📊 Avaliando modelo após pruning (antes do fine-tuning)...")
-    after_prune_metrics = pruner.evaluate(DATA_YAML)
+    # Informações após pruning
+    print("\n" + "="*70)
+    print("APÓS PRUNING (antes do fine-tuning)")
+    print("="*70)
+    after_prune_info = pruner.get_model_info()
+    print(f"Parâmetros totais: {after_prune_info['total_params']:,}")
+    print(f"Parâmetros não-zero: {after_prune_info['nonzero_params']:,}")
+    print(f"Parâmetros zerados: {after_prune_info['zero_params']:,}")
+    print(f"Esparsidade: {after_prune_info['sparsity']:.2f}%")
+    print(f"Tamanho: {after_prune_info['size_mb']:.2f} MB")
+    
+    # Avaliar após pruning
+    print("\n📊 Avaliando após pruning (antes do fine-tuning)...")
+    after_prune_metrics = pruner.evaluate(DATA_YAML, verbose=True)
     after_prune_map50 = after_prune_metrics.box.map50
     print(f"mAP50: {after_prune_map50:.4f} (Δ {after_prune_map50 - original_map50:+.4f})")
     
     # Fine-tuning
-    print("\n" + "=" * 60)
+    print("\n" + "="*70)
     print("FINE-TUNING")
-    print("=" * 60)
-    print("Isso pode levar algum tempo...")
+    print("="*70)
     pruner.fine_tune(DATA_YAML, epochs=FINETUNE_EPOCHS, batch=16, patience=20)
     
     # Avaliação final
-    print("\n" + "=" * 60)
+    print("\n" + "="*70)
     print("AVALIAÇÃO FINAL")
-    print("=" * 60)
-    final_metrics = pruner.evaluate(DATA_YAML)
+    print("="*70)
+    final_metrics = pruner.evaluate(DATA_YAML, verbose=True)
     final_map50 = final_metrics.box.map50
     print(f"mAP50: {final_map50:.4f}")
+    
+    # Informações finais
+    final_info = pruner.get_model_info()
     
     # Salvar modelo
     pruner.save_pruned_model(OUTPUT_PATH)
     
-    # Exportar para ONNX (opcional)
-    # pruner.export_onnx('model_pruned.onnx')
-    
     # Resumo completo
-    print("\n" + "=" * 60)
+    print("\n" + "="*70)
     print("📊 RESUMO COMPLETO")
-    print("=" * 60)
-    print(f"\n🔧 MODELO:")
-    print(f"  Original:      {MODEL_PATH}")
-    print(f"  Pruned:        {OUTPUT_PATH}")
-    print(f"  Prune Ratio:   {PRUNE_RATIO*100:.0f}%")
+    print("="*70)
     
-    print(f"\n📦 TAMANHO:")
-    print(f"  Original:      {original_size:.2f} MB")
-    print(f"  Pruned:        {pruned_size:.2f} MB")
-    print(f"  Redução:       {(1 - pruned_size/original_size)*100:.2f}%")
+    print(f"\n🔧 CONFIGURAÇÃO:")
+    print(f"  Modelo original: {MODEL_PATH}")
+    print(f"  Modelo pruned: {OUTPUT_PATH}")
+    print(f"  Prune ratio: {PRUNE_RATIO:.1%}")
+    
+    print(f"\n📦 COMPRESSÃO:")
+    print(f"  Tamanho original: {original_info['size_mb']:.2f} MB")
+    print(f"  Tamanho final: {final_info['size_mb']:.2f} MB")
+    print(f"  Redução: {(1 - final_info['size_mb']/original_info['size_mb'])*100:.2f}%")
     
     print(f"\n🔢 PARÂMETROS:")
-    print(f"  Original:      {original_params:,}")
-    print(f"  Pruned:        {pruned_params:,}")
-    print(f"  Redução:       {(1 - pruned_params/original_params)*100:.2f}%")
+    print(f"  Total original: {original_info['total_params']:,}")
+    print(f"  Não-zero final: {final_info['nonzero_params']:,}")
+    print(f"  Esparsidade: {final_info['sparsity']:.2f}%")
+    print(f"  Redução efetiva: {(1 - final_info['nonzero_params']/original_info['total_params'])*100:.2f}%")
     
     print(f"\n📈 PERFORMANCE (mAP50):")
-    print(f"  Original:              {original_map50:.4f}")
-    print(f"  Após Pruning:          {after_prune_map50:.4f} ({after_prune_map50 - original_map50:+.4f})")
-    print(f"  Após Fine-tuning:      {final_map50:.4f} ({final_map50 - original_map50:+.4f})")
-    print(f"  Recovery:              {((final_map50 - after_prune_map50)/(original_map50 - after_prune_map50)*100):.1f}%")
+    print(f"  Original:          {original_map50:.4f}")
+    print(f"  Após Pruning:      {after_prune_map50:.4f} ({after_prune_map50 - original_map50:+.4f})")
+    print(f"  Após Fine-tuning:  {final_map50:.4f} ({final_map50 - original_map50:+.4f})")
     
-    print("\n" + "=" * 60)
+    if after_prune_map50 < original_map50:
+        recovery = (final_map50 - after_prune_map50) / (original_map50 - after_prune_map50) * 100
+        print(f"  Recovery: {recovery:.1f}%")
+    
+    print("\n" + "="*70)
     print("✅ PROCESSO COMPLETO!")
-    print("=" * 60)
+    print("="*70)
+    
+    print("\n💡 PRÓXIMOS PASSOS:")
+    print("  1. Teste o modelo pruned em inferência")
+    print("  2. Para redução real de tamanho, use quantização:")
+    print("     model.export(format='engine', half=True)  # TensorRT FP16")
+    print("  3. Ou combine com Knowledge Distillation para melhor performance")
