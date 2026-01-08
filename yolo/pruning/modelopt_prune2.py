@@ -54,6 +54,7 @@ class PrunedTrainer:
                 Setup modificado que aplica pruning antes do treinamento
                 """
                 import os
+                import time
                 
                 # Chama setup original
                 super()._setup_train()
@@ -69,8 +70,14 @@ class PrunedTrainer:
                 ]
                 for ckpt_file in checkpoint_files:
                     if os.path.exists(ckpt_file):
-                        os.remove(ckpt_file)
-                        LOGGER.info(f"Removido checkpoint antigo: {ckpt_file}")
+                        try:
+                            os.remove(ckpt_file)
+                            LOGGER.info(f"Removido checkpoint antigo: {ckpt_file}")
+                        except:
+                            pass
+                
+                # Usa timestamp para checkpoint único
+                checkpoint_name = f"modelopt_fastnas_{int(time.time())}.pth"
                 
                 # Função para coletar batches
                 def collect_func(batch):
@@ -129,7 +136,7 @@ class PrunedTrainer:
                     dummy_input=dummy_input,
                     config={
                         "score_func": score_func,
-                        "checkpoint": "modelopt_fastnas_search_checkpoint.pth",
+                        "checkpoint": checkpoint_name,  # Nome único por execução
                         "data_loader": self.train_loader,
                         "collect_func": collect_func,
                         "max_iter_data_loader": 20,  # Use 50 para melhores resultados (requer mais RAM)
@@ -335,6 +342,19 @@ def compare_models(original_path, pruned_path, data_yaml="coco128.yaml"):
 
 # Exemplo de uso
 if __name__ == "__main__":
+    import os
+    import glob
+    
+    # LIMPA CHECKPOINTS ANTIGOS ANTES DE COMEÇAR
+    print("\n🧹 Limpando checkpoints antigos...")
+    old_checkpoints = glob.glob("modelopt_*.pth")
+    for ckpt in old_checkpoints:
+        try:
+            os.remove(ckpt)
+            print(f"   Removido: {ckpt}")
+        except:
+            pass
+    
     # Configurações
     MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
