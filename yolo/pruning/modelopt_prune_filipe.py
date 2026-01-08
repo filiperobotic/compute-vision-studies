@@ -200,6 +200,25 @@ def main():
     except Exception as e:
         print(f"[WARN] Could not patch ModelOpt select(strict=False): {e}")
 
+    # Stronger workaround: even with select(strict=False), some ModelOpt versions still raise in
+    # _SearchSpaceUnwrapped.select(...) during restore. Patch it to be non-strict and non-fatal.
+    try:
+        import modelopt.torch.opt.dynamic as _mdyn
+        _orig_ss_selsect = _mdyn._SearchSpaceUnwrapped.select
+
+        def _ss_select_nonstrict(self, config, strict=True):
+            try:
+                return _orig_ss_select(self, config, strict=False)
+            except RuntimeError as e:
+                print("[WARN] ModelOpt restore select() failed; continuing without strict restore.")
+                print(f"       {e}")
+                return
+
+        _mdyn._SearchSpaceUnwrapped.select = _ss_select_nonstrict
+        print("[ModelOpt] Patched _SearchSpaceUnwrapped.select(strict=False, non-fatal) for checkpoint restore.")
+    except Exception as e:
+        print(f"[WARN] Could not patch _SearchSpaceUnwrapped.select: {e}")
+
     class PrunedTrainer(model.task_map[model.task]["trainer"]):
         # Ultralytics may call final_eval() at the end of training even when val=False.
         # With ModelOpt pruning, final_eval loads the checkpoint via AutoBackend and can fail restoring
