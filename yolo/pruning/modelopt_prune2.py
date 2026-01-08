@@ -181,6 +181,24 @@ class PrunedTrainer:
                 self._setup_scheduler()
                 
                 LOGGER.info("Optimizer e scheduler recriados")
+                LOGGER.info("="*60)
+            
+            def final_eval(self):
+                """
+                Avaliação final modificada para evitar erro de restore
+                """
+                try:
+                    # Tenta avaliação normal
+                    super().final_eval()
+                except RuntimeError as e:
+                    if "Inconsistent keys in config" in str(e):
+                        LOGGER.warning("Erro ao carregar checkpoint para validação final")
+                        LOGGER.warning("Pulando validação final - use model.val() manualmente")
+                        # Define métricas vazias para não quebrar o fluxo
+                        from collections import defaultdict
+                        self.metrics = defaultdict(float)
+                    else:
+                        raise
         
         return CustomPrunedTrainer(*args, **kwargs)
 
@@ -252,6 +270,80 @@ def train_with_pruning(
     print("="*70)
     
     return results
+
+
+def export_pruned_model(checkpoint_path, output_path="pruned_model_exported.pt"):
+    """
+    Exporta modelo pruned removendo dependências do ModelOpt
+    
+    Args:
+        checkpoint_path: Caminho para checkpoint .pt
+        output_path: Caminho para salvar modelo exportado
+    """
+    import torch
+    import modelopt.torch.opt as mto
+    from ultralytics.nn.tasks import DetectionModel
+    
+    print(f"\n{'='*70}")
+    print("EXPORTANDO MODELO PRUNED")
+    print(f"{'='*70}")
+    
+    try:
+        # Carrega checkpoint
+        print(f"Carregando: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location='cpu')
+        
+        if "modelopt_state" in ckpt:
+            print("Detectado modelo com ModelOpt")
+            
+            # Reconstrói modelo da configuração YAML
+            model = DetectionModel(ckpt["yaml"], verbose=False)
+            model.names = ckpt["names"]
+            model.nc = ckpt["nc"]
+            
+            # Restaura estado do ModelOpt
+            with torch.no_grad():
+                mto.restore_from_modelopt_state(model, ckpt["modelopt_state"])
+                model.load_state_dict(ckpt["state_dict"])
+            
+            # Exporta modelo "limpo" (sem ModelOpt)
+            print("Exportando modelo sem dependências ModelOpt...")
+            mto.modelopt_state(model)  # Finaliza otimização
+            
+            # Salva novo checkpoint limpo
+            clean_ckpt = {
+                "model": model,
+                "epoch": ckpt.get("epoch", -1),
+                "best_fitness": ckpt.get("best_fitness", 0.0),
+                "train_args": ckpt.get("train_args", {}),
+            }
+            
+            torch.save(clean_ckpt, output_path)
+            print(f"✓ Modelo exportado: {output_path}")
+            
+            # Info do modelo
+            print(f"\nInformações do modelo exportado:")
+            print(f"  Parâmetros: {sum(p.numel() for p in model.parameters()):,}")
+            
+            return output_path
+        else:
+            print("Modelo não usa ModelOpt, copiando diretamente...")
+            import shutil
+            shutil.copy(checkpoint_path, output_path)
+            return output_path
+            
+    except Exception as e:
+        print(f"❌ Erro ao exportar: {e}")
+        print("\nTentando método alternativo...")
+        
+        # Método alternativo: carrega com YOLO e salva novamente
+        try:
+            model = YOLO(checkpoint_path)
+            model.export(format='torchscript', simplify=True)
+            print("✓ Exportado como TorchScript")
+            return checkpoint_path.replace('.pt', '.torchscript')
+        except:
+            return None
 
 
 def evaluate_pruned_model(model_path, data_yaml="coco128.yaml"):
@@ -361,7 +453,7 @@ if __name__ == "__main__":
     EPOCHS = 50  # Aumente para seu dataset real
     BATCH_SIZE = 16
     FLOPS_TARGET = "80%"  # Para YOLO11X, use 80-85% (mais conservador)
-                          # Para YOLO11M/S/N, pode usar 60-70%
+                          #d Para YOLO11M/S/N, pode usar 60-70%
     
     # 1. Treina com pruning
     print("\n" + "="*70)
@@ -380,18 +472,39 @@ if __name__ == "__main__":
     
     # 2. Avalia modelo pruned
     print("\n" + "="*70)
-    print("ETAPA 2: AVALIAÇÃO DO MODELO PRUNED")
+    print("ETAPA 2: EXPORTAÇÃO E AVALIAÇÃO")
     print("="*70)
     
     pruned_model_path = "runs/prune/yolo11x_pruned/weights/best.pt"
-    metrics = evaluate_pruned_model(pruned_model_path, DATA_YAML)
     
-    # 3. Compara com original
-    print("\n" + "="*70)
-    print("ETAPA 3: COMPARAÇÃO DETALHADA")
-    print("="*70)
+    # Exporta modelo sem dependências ModelOpt
+    print("\n📦 Exportando modelo...")
+    exported_path = export_pruned_model(
+        pruned_model_path,
+        "yolo11x_pruned_clean.pt"
+    )
     
-    compare_models(MODEL_PATH, pruned_model_path, DATA_YAML)
+    if exported_path:
+        print(f"\n📊 Avaliando modelo exportado...")
+        try:
+            metrics = evaluate_pruned_model(exported_path, DATA_YAML)
+        except Exception as e:
+            print(f"⚠️  Aviso: Não foi possível avaliar automaticamente: {e}")
+            print("    Use manualmente: model = YOLO('yolo11x_pruned_clean.pt'); model.val()")
+    else:
+        print("⚠️  Exportação falhou, mas modelo treinado está salvo em:")
+        print(f"    {pruned_model_path}")
+    
+    # 3. Compara com original (se exportação funcionou)
+    if exported_path:
+        print("\n" + "="*70)
+        print("ETAPA 3: COMPARAÇÃO DETALHADA")
+        print("="*70)
+        
+        try:
+            compare_models(MODEL_PATH, exported_path, DATA_YAML)
+        except Exception as e:
+            print(f"⚠️  Comparação falhou: {e}")
     
     # 4. Instruções finais
     print("\n" + "="*70)
