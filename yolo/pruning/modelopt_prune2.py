@@ -70,7 +70,11 @@ class PrunedTrainer:
                     self.validator.args.plots = plots_orig
                     self.validator.args.verbose = verbose_orig
                     
-                    return metrics.fitness
+                    # Retorna fitness (pode ser dict ou objeto com .fitness)
+                    if isinstance(metrics, dict):
+                        return metrics.get("fitness", 0.0)
+                    else:
+                        return metrics.fitness
                 
                 # Configurações de pruning
                 # Você pode ajustar para "30%", "50%", "66%", etc.
@@ -299,14 +303,14 @@ def compare_models(original_path, pruned_path, data_yaml="coco128.yaml"):
     print("\n" + "="*70)
 
 
-# Exemplo de uso
+# Exemplo de usod
 if __name__ == "__main__":
     # Configurações
     MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
     BATCH_SIZE = 16
-    FLOPS_TARGET = "66%"  # sPode testar 30%, 50%, 66%
+    FLOPS_TARGET = "66%"  # Pode testar 30%, 50%, 66%
     
     # 1. Treina com pruning
     print("\n" + "="*70)
