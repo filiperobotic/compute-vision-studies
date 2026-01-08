@@ -356,7 +356,7 @@ if __name__ == "__main__":
             pass
     
     # Configurações
-    MODEL_PATH = "yolo11x.pt"
+    MODEL_PATH = "yolo11m.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
     BATCH_SIZE = 16
