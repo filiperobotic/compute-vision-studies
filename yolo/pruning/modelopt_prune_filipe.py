@@ -147,6 +147,13 @@ def main():
     print(f"Params: {total_params_orig:,}")
     report_ultralytics_metrics(model, WEIGHTS, "METRICS (ORIGINAL MODEL)", imgsz=IMG_SIZE)
 
+    # Ultralytics ModelOpt/QAT integration may require newer PyTorch.
+    # Your traceback showed: AssertionError: QAT requires PyTorch>=2.6
+    v = tuple(int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
+    if v < (2, 6):
+        print("[WARN] Your torch version is", torch.__version__)
+        print("       Ultralytics ModelOpt/QAT integration may assert: 'QAT requires PyTorch>=2.6'.")
+        print("       Quick fix: upgrade torch/torchvision to >=2.6 (matching your CUDA), OR run training with val=False.")
     import modelopt.torch.prune as mtp  # needs nvidia-modelopt
     from ultralytics.utils import LOGGER
     from ultralytics.utils.torch_utils import ModelEMA
@@ -205,7 +212,16 @@ def main():
             LOGGER.info(f"[ModelOpt] Applied pruning constraints: {prune_constraints}")
 
     # finetune pruned model
-    train_res = model.train(data=DATA_YAML, trainer=PrunedTrainer, epochs=FINETUNE_EPOCHS, imgsz=IMG_SIZE)
+    # NOTE: Ultralytics runs a final_eval() that can trigger ModelOpt/QAT checks when modelopt is installed.
+    # Setting val=False avoids the final validation AutoBackend load path that raised 'QAT requires PyTorch>=2.6'.
+    train_res = model.train(
+        data=DATA_YAML,
+        trainer=PrunedTrainer,
+        epochs=FINETUNE_EPOCHS,
+        imgsz=IMG_SIZE,
+        val=False,
+    )
+    print("[INFO] Training completed with val=False (skipped Ultralytics final_eval).")
 
     # find best.pt
     save_dir = getattr(train_res, "save_dir", None)
