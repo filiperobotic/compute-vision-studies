@@ -1,3 +1,23 @@
+from __future__ import annotations
+
+import argparse
+import io
+import logging
+import math
+import os
+import re
+import time
+from collections import defaultdict
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+
+from ultralytics import YOLO
+from ultralytics.utils import LOGGER
+from ultralytics.utils.torch_utils import ModelEMA, model_info
+
+import modelopt.torch.prune as mtp
 from ultralytics import YOLO
 import modelopt.torch.prune as mtp
 from ultralytics.utils import LOGGER
@@ -147,26 +167,7 @@ Example:
     --power-w 6.05
 """
 
-from __future__ import annotations
 
-import argparse
-import io
-import logging
-import math
-import os
-import re
-import time
-from collections import defaultdict
-from pathlib import Path
-
-import torch
-import torch.nn as nn
-
-from ultralytics import YOLO
-from ultralytics.utils import LOGGER
-from ultralytics.utils.torch_utils import ModelEMA, model_info
-
-import modelopt.torch.prune as mtp
 
 
 # ---------------------------
