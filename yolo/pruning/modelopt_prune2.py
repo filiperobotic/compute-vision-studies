@@ -184,6 +184,18 @@ class PrunedTrainer:
                 # Salva referência ao modelo pruned para exportação posterior
                 self.pruned_model_for_export = self.model
             
+            def _do_train(self):
+                """
+                Override de _do_train para garantir initial_lr antes do loop
+                """
+                # Garante que initial_lr existe em todos os param_groups
+                for group in self.optimizer.param_groups:
+                    if 'initial_lr' not in group:
+                        group['initial_lr'] = group.get('lr', self.args.lr0)
+                
+                # Chama o _do_train original
+                super()._do_train()
+            
             def final_eval(self):
                 """
                 Avaliação final modificada para evitar erro de restore
@@ -499,7 +511,7 @@ if __name__ == "__main__":
             pass
     
     # Configurações
-    MODEL_PATH = "yolo11x.pt"
+    MODEL_PATH = "yolo11m.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
     BATCH_SIZE = 16
@@ -582,7 +594,7 @@ if __name__ == "__main__":
     print("     pruned_model.export(format='engine', half=True)")
     print("")
     print("  2. Para carregar o modelo pruned posteriormente:")
-    print("     from ultralytics import YOLO")
+    # print("     from ultralytics import YOLO")
     # print(f"     model = YOLO('{pruned_model_path}')")
     # print("")
     # print("  3. Ajuste FLOPS_TARGET para diferentes níveis de compressão:")
