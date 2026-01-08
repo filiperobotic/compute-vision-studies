@@ -2,6 +2,7 @@ from ultralytics import YOLO
 import torch, os, time, io, re, logging
 from contextlib import redirect_stdout
 from pathlib import Path
+from collections import defaultdict
 from utils import metrics
 
 # --------- CONFIG ---------
@@ -154,6 +155,14 @@ def main():
         print("[WARN] Your torch version is", torch.__version__)
         print("       Ultralytics ModelOpt/QAT integration may assert: 'QAT requires PyTorch>=2.6'.")
         print("       Quick fix: upgrade torch/torchvision to >=2.6 (matching your CUDA), OR run training with val=False.")
+    # PyTorch 2.6 changed torch.load default to weights_only=True, which can break ModelOpt's search checkpoint
+    # unpickling (e.g., collections.defaultdict). If the checkpoint is local/trusted, allowlist defaultdict.
+    try:
+        if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
+            torch.serialization.add_safe_globals([defaultdict])
+    except Exception as e:
+        print(f"[WARN] Could not add_safe_globals(defaultdict): {e}")
+
     import modelopt.torch.prune as mtp  # needs nvidia-modelopt
     from ultralytics.utils import LOGGER
     from ultralytics.utils.torch_utils import ModelEMA
@@ -181,6 +190,14 @@ def main():
             prune_constraints = {"flops": FLOPS_TARGET}  #  [oai_citation:5‡Yasin's Keep](https://y-t-g.github.io/tutorials/yolo-prune/)
             self.model.is_fused = lambda: True  # disable fusing  [oai_citation:6‡Yasin's Keep](https://y-t-g.github.io/tutorials/yolo-prune/)
 
+            ckpt_path = f"modelopt_fastnas_search_checkpoint_torch{torch.__version__.split('+')[0]}.pth"
+            if os.path.exists(ckpt_path):
+                print(f"[ModelOpt] Removing existing search checkpoint (may be incompatible): {ckpt_path}")
+                try:
+                    os.remove(ckpt_path)
+                except Exception as e:
+                    print(f"[WARN] Could not remove {ckpt_path}: {e}")
+
             self.model, _ = mtp.prune(
                 model=self.model,
                 mode="fastnas",
@@ -188,7 +205,7 @@ def main():
                 dummy_input=torch.randn(1, 3, self.args.imgsz, self.args.imgsz).to(self.device),
                 config={
                     "score_func": score_func,
-                    "checkpoint": "modelopt_fastnas_search_checkpoint.pth",
+                    "checkpoint": f"modelopt_fastnas_search_checkpoint_torch{torch.__version__.split('+')[0]}.pth",
                     "data_loader": self.train_loader,
                     "collect_func": collect_func,
                     "max_iter_data_loader": MAX_ITER_DATALOADER,
