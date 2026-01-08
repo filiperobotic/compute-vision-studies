@@ -364,8 +364,8 @@ def train_baseline(args) -> str:
         device=args.device,
         project=args.project,
         name=args.name_baseline,
-        pretrained=True,
-        exist_ok=True,
+        # pretrained=True,
+        # exist_ok=True,
         warmup_epochs=0,
     )
 
@@ -417,7 +417,7 @@ def prune_and_finetune(args, baseline_best: str) -> str:
         project=args.project,
         name=args.name_pruned,
         trainer=PrunedTrainer,
-        exist_ok=True,
+        # exist_ok=True,
         warmup_epochs=0,
     )
 
