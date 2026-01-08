@@ -166,12 +166,12 @@ class YOLOPruner:
                     
                     # Transfere pesos selecionados
                     selected_weight = weight[top_indices_out][:, top_indices_in]
-                    tgt_module.weight.data = torch.from_numpy(selected_weight).to(self.device)
+                    tgt_module.weight.data = torch.from_numpy(selected_weight).to(self.device).contiguous()
                     
                     # Transfere bias se existir
                     if src_module.bias is not None and tgt_module.bias is not None:
                         selected_bias = src_module.bias.data.cpu().numpy()[top_indices_out]
-                        tgt_module.bias.data = torch.from_numpy(selected_bias).to(self.device)
+                        tgt_module.bias.data = torch.from_numpy(selected_bias).to(self.device).contiguous()
                     
                     transferred += 1
             
@@ -188,16 +188,16 @@ class YOLOPruner:
                     top_indices = np.sort(top_indices)
                     
                     # Transfere parâmetros
-                    tgt_module.weight.data = torch.from_numpy(bn_weight[top_indices]).to(self.device)
+                    tgt_module.weight.data = torch.from_numpy(bn_weight[top_indices]).to(self.device).contiguous()
                     
                     bn_bias = src_module.bias.data.cpu().numpy()
-                    tgt_module.bias.data = torch.from_numpy(bn_bias[top_indices]).to(self.device)
+                    tgt_module.bias.data = torch.from_numpy(bn_bias[top_indices]).to(self.device).contiguous()
                     
                     running_mean = src_module.running_mean.data.cpu().numpy()
-                    tgt_module.running_mean.data = torch.from_numpy(running_mean[top_indices]).to(self.device)
+                    tgt_module.running_mean.data = torch.from_numpy(running_mean[top_indices]).to(self.device).contiguous()
                     
                     running_var = src_module.running_var.data.cpu().numpy()
-                    tgt_module.running_var.data = torch.from_numpy(running_var[top_indices]).to(self.device)
+                    tgt_module.running_var.data = torch.from_numpy(running_var[top_indices]).to(self.device).contiguous()
         
         print(f"✓ Transferidos pesos de {transferred} camadas convolucionais")
     
