@@ -4,7 +4,7 @@
 """Train-from-scratch -> ModelOpt FastNAS prune -> fine-tune, with detailed metrics.
 
 Stages:
-  1) Train baseline from scratch (pretrained=False) from a model YAML.
+  1) Train baseline from scratch (pretrained=True) from a model YAML.
   2) Apply ModelOpt FastNAS pruning to reach a FLOPs target (%).
   3) Fine-tune the pruned model.
 
@@ -102,7 +102,7 @@ def extract_gflops(yolo: YOLO, imgsz: int) -> float:
     except Exception:
         txt = ""
 
-    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*GFLOPs", txt)
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*GFLOPs",e txt)
     if not m:
         raise RuntimeError("Could not extract GFLOPs from Ultralytics output.")
     return float(m.group(1))
@@ -364,7 +364,7 @@ def train_baseline(args) -> str:
         device=args.device,
         project=args.project,
         name=args.name_baseline,
-        pretrained=False,
+        pretrained=True,
         exist_ok=True,
         warmup_epochs=0,
     )
