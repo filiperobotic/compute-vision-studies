@@ -339,7 +339,7 @@ if __name__ == "__main__":
     MODEL_PATH = "yolo11x.pt"
     DATA_YAML = "data.yaml"  # Use seu dataset aqui
     EPOCHS = 50  # Aumente para seu dataset real
-    BATCH_SIZE = 16d
+    BATCH_SIZE = 16
     FLOPS_TARGET = "80%"  # Para YOLO11X, use 80-85% (mais conservador)
                           # Para YOLO11M/S/N, pode usar 60-70%
     
