@@ -1,148 +1,53 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""Train-from-scratch -> ModelOpt FastNAS prune -> fine-tune, with detailed metrics.
-
-Stages:
-  1) Train baseline from scratch (pretrained=True).
-  2) Apply ModelOpt FastNAS pruning to reach a FLOPs target (%).
-  3) Fine-tune the pruned model.
-
-Reported metrics (baseline + pruned):
-- mAP50 / mAP50-95 on VAL split
-- mAP50 / mAP50-95 on TEST split (if present)
-- Params (M)
-- GFLOPs (imgsz)
-- MACs (G)
-- Analytical energy (J/img, mJ/img) using E_MAC
-- Forward-only inference time (ms/img)
-- Joules/img using POWER_W
-- Peak GPU memory (MB)
-- Checkpoint size (MB)
-- StateDict size (MB): native dtypes, fp32-cast, fp16-cast (fair size comparison)
-
-Usage example:
-  python -m yolo.pruning.modelopt_prune4 \
-    --model yolo11x.pt \
-    --data data.yaml \
-    --imgsz 640 \
-    --epochs 100 \
-    --ft-epochs 50 \
-    --flops-target 66% \
-    --power-w 6.05 \
-    --e-mac 4.6e-12 \
-    --report-test
-"""
-
 from __future__ import annotations
 
-import argparse
 import io
 import logging
 import math
 import os
 import re
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
-# ---------------------------
-# Workaround: allow re-loading ModelOpt checkpoints even if subnet_config keys drift
-# IMPORTANT: must run BEFORE importing Ultralytics because Ultralytics may cache the restore fn.
-# Error looks like: "Inconsistent keys in config ... set strict=False".
-# ---------------------------
-try:
-    import modelopt.torch.opt.conversion as mto  # noqa: WPS433
-
-    if hasattr(mto, "restore_from_modelopt_state"):
-        _orig_restore_from_modelopt_state = mto.restore_from_modelopt_state
-
-        def _restore_from_modelopt_state_patched(model, modelopt_state, *args, **kwargs):
-            # Always force non-strict restore to avoid crashes due to minor key mismatches.
-            # Ultralytics may pass strict=True explicitly, so we override it.
-            kwargs["strict"] = False
-            try:
-                return _orig_restore_from_modelopt_state(model, modelopt_state, *args, **kwargs)
-            except TypeError:
-                # Older signatures may not accept strict; retry without it.
-                kwargs.pop("strict", None)
-                return _orig_restore_from_modelopt_state(model, modelopt_state, *args, **kwargs)
-
-        mto.restore_from_modelopt_state = _restore_from_modelopt_state_patched
-        print("[INFO] Patched modelopt.torch.opt.conversion.restore_from_modelopt_state(strict=False) [early]")
-except Exception as _e:
-    print(f"[WARN] Could not patch ModelOpt restore_from_modelopt_state [early]: {_e}")
-
 from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from ultralytics.utils.torch_utils import ModelEMA, model_info
 
-# Patch any cached reference inside Ultralytics (if it imported conversion earlier)
-try:
-    import ultralytics.nn.tasks as _tasks  # noqa: WPS433
-    if hasattr(_tasks, "mto") and hasattr(_tasks.mto, "restore_from_modelopt_state"):
-        _tasks.mto.restore_from_modelopt_state = mto.restore_from_modelopt_state
-        print("[INFO] Patched ultralytics.nn.tasks.mto.restore_from_modelopt_state -> strict=False wrapper")
-except Exception as _e:
-    print(f"[WARN] Could not patch Ultralytics cached ModelOpt restore: {_e}")
-
-
 import modelopt.torch.prune as mtp
 
-# ---------------------------
-# Checkpoint helper
-# ---------------------------
 
-def strip_modelopt_state(in_path: str, out_path: str) -> str:
-    """Save a copy of a YOLO checkpoint without ModelOpt metadata.
+# =====================
+# USER SETTINGS
+# =====================
+DATA_YAML = "./data.yaml"
+IMG_SIZE = 640
+BATCH = 16
+DEVICE = 0
 
-    Ultralytics will try to call ModelOpt restore if `modelopt_state` exists in the checkpoint.
-    For already-materialized pruned models, this restore can fail due to subnet_config mismatches.
-    Removing the key makes the checkpoint load like a normal YOLO checkpoint.
-    """
-    if not in_path or not os.path.exists(in_path):
-        return in_path
-    try:
-        # PyTorch 2.6 defaults to weights_only=True, which fails for Ultralytics checkpoints.
-        # We are stripping metadata from our *own* checkpoints, so loading the full object is OK.
-        ckpt = torch.load(in_path, map_location="cpu", weights_only=False)
-        if isinstance(ckpt, dict) and "modelopt_state" in ckpt:
-            ckpt = dict(ckpt)  # shallow copy
-            ckpt.pop("modelopt_state", None)
-            ckpt.pop("modelopt_metadata", None)
-            ckpt.pop("modelopt_version", None)
-            torch.save(ckpt, out_path)
-            print(f"[INFO] Wrote clean checkpoint without modelopt_state: {out_path}")
-            return out_path
-    except Exception as e:
-        print(f"[WARN] Could not strip modelopt_state from {in_path}: {e}")
-    return in_path
+# Split epochs for baseline and pruning fine-tuning
+EPOCHS_BASELINE = 100   # train original model
+EPOCHS_PRUNED = 50      # fine-tune after pruning
+BATCH = 16
+DEVICE = 0
+
+# Energy settings
+POWER_W = 6.05      # measured power in Watts (for Joules/img)
+E_MAC = 4.6e-12     # Joules per MAC (paper constant)
+REPORT_TEST = True  # try to also print TEST mAP, if data.yaml has `test:`
+
+# Models
+ORIGINAL_MODEL_SRC = "yolov10x.pt"  # change to yolo11x.pt if you want
+
+# Pruning
+FLOPS_TARGET = "66%"
+SEARCH_CKPT = "modelopt_fastnas_search_checkpoint.pth"
 
 
-# ---------------------------
-# PyTorch 2.6 safe unpickling (ModelOpt search checkpoint may contain defaultdict)
-# ---------------------------
-try:
-    if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
-        torch.serialization.add_safe_globals([defaultdict])
-        print("[INFO] Added safe global: collections.defaultdict")
-        # Allowlist Ultralytics model class for weights_only unpickling (PyTorch 2.6).
-        try:
-            from ultralytics.nn.tasks import DetectionModel  # noqa: WPS433
-            torch.serialization.add_safe_globals([DetectionModel])
-            print("[INFO] Added safe global: ultralytics.nn.tasks.DetectionModel")
-        except Exception as _e:
-            print(f"[WARN] Could not add_safe_globals([DetectionModel]): {_e}")
-except Exception as e:
-    print(f"[WARN] Could not add_safe_globals([defaultdict]): {e}")
-
-
-# ---------------------------
-# Metrics helpers
-# ---------------------------
+# =====================
+# METRICS HELPERS
+# =====================
 
 def extract_gflops(yolo: YOLO, imgsz: int) -> float:
     """Return GFLOPs from Ultralytics model_info; fallback to parsing yolo.info output."""
@@ -237,7 +142,6 @@ def state_dict_size_mb(yolo: YOLO, cast_dtype: torch.dtype | None = None) -> flo
             continue
         tt = t
         if cast_dtype is not None and tt.is_floating_point():
-            # virtual cast for size estimate
             if cast_dtype == torch.float16:
                 bpe = 2
             elif cast_dtype == torch.float32:
@@ -262,9 +166,15 @@ def val_maps(yolo: YOLO, data_yaml: str, imgsz: int, split: str) -> tuple[float 
         return None, None
 
 
+def checkpoint_size_mb(path: str) -> float | None:
+    if path and os.path.exists(path):
+        return os.path.getsize(path) / 1e6
+    return None
+
+
 def report_metrics(
     yolo: YOLO,
-    weights_path: str,
+    weights_path: str | None,
     title: str,
     imgsz: int,
     power_w: float,
@@ -272,7 +182,7 @@ def report_metrics(
     data_yaml: str,
     report_test: bool,
 ):
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print(title)
     print("=" * 70)
 
@@ -334,270 +244,181 @@ def report_metrics(
     else:
         print("[INFO] Forward-only timing skipped (non-torch backend).")
 
-    # file size on disk
-    if weights_path and os.path.exists(weights_path):
-        size_mb = os.path.getsize(weights_path) / 1e6
-        print(f"Checkpoint size (on disk): {size_mb:.1f} MB")
+    # checkpoint size
+    if weights_path:
+        csz = checkpoint_size_mb(weights_path)
+        if csz is not None:
+            print(f"Checkpoint size (on disk): {csz:.1f} MB")
 
-    print("=" * 70)
-    print()
+    # model summary
+    try:
+        yolo.info(imgsz=imgsz)
+    except Exception:
+        try:
+            yolo.info()
+        except Exception:
+            pass
 
 
-# ---------------------------
-# Trainer factory: applies ModelOpt prune before training loop starts
-# ---------------------------
+# =====================
+# STAGE 1: BASELINE TRAINING (ORIGINAL MODEL)
+# =====================
 
-def make_pruned_trainer(base_trainer_cls, data_yaml: str, flops_target: str):
-    class PrunedTrainer(base_trainer_cls):
-        def _setup_train(self):
-            super()._setup_train()
+print("\n" + "#" * 70)
+print("STAGE 1: Train baseline (original model)")
+print("#" * 70)
 
-            def collect_func(batch):
-                return self.preprocess_batch(batch)["img"]
+baseline = YOLO(ORIGINAL_MODEL_SRC)
+res_base = baseline.train(
+    data=DATA_YAML,
+    epochs=EPOCHS_BASELINE,
+    imgsz=IMG_SIZE,
+    batch=BATCH,
+    device=DEVICE,
+    exist_ok=True,
+)
 
-            def score_func(model: nn.Module):
-                model.eval()
-                # Disable logs
-                self.validator.args.save = False
-                self.validator.args.plots = False
-                self.validator.args.verbose = False
-                self.validator.args.data = data_yaml
-                metrics = self.validator(model=model)
-                # Restore
-                self.validator.args.save = self.args.save
-                self.validator.args.plots = self.args.plots
-                self.validator.args.verbose = self.args.verbose
-                self.validator.args.data = self.args.data
-                return metrics["fitness"]
+base_dir = getattr(res_base, "save_dir", None)
+if base_dir is None:
+    base_dir = Path("runs")
 
-            # Versioned checkpoint (avoid stale/incompatible file)
-            ckpt_name = f"modelopt_fastnas_search_checkpoint_torch{torch.__version__.split('+')[0]}.pth"
-            if os.path.exists(ckpt_name):
-                print(f"[ModelOpt] Removing existing search checkpoint: {ckpt_name}")
-                try:
-                    os.remove(ckpt_name)
-                except Exception as e:
-                    print(f"[WARN] Could not remove {ckpt_name}: {e}")
+base_best = os.path.join(str(base_dir), "weights", "best.pt")
+base_last = os.path.join(str(base_dir), "weights", "last.pt")
+if not os.path.exists(base_best) and os.path.exists(base_last):
+    base_best = base_last
 
-            prune_constraints = {"flops": flops_target}
+print(f"[INFO] Baseline save_dir: {base_dir}")
+print(f"[INFO] Baseline best checkpoint: {base_best}")
 
-            # Ultralytics fuse guard
-            self.model.is_fused = lambda: True
+baseline_best_model = YOLO(base_best)
+try:
+    baseline_best_model.fuse()
+except Exception:
+    pass
 
-            self.model, _prune_res = mtp.prune(
-                model=self.model,
-                mode="fastnas",
-                constraints=prune_constraints,
-                dummy_input=torch.randn(1, 3, self.args.imgsz, self.args.imgsz).to(self.device),
-                config={
-                    "score_func": score_func,
-                    "checkpoint": ckpt_name,
-                    "data_loader": self.train_loader,
-                    "collect_func": collect_func,
-                    "max_iter_data_loader": 20,
-                },
-            )
+report_metrics(
+    baseline_best_model,
+    base_best,
+    "METRICS (BASELINE TRAINED - BEFORE PRUNING)",
+    imgsz=IMG_SIZE,
+    power_w=POWER_W,
+    e_mac=E_MAC,
+    data_yaml=DATA_YAML,
+    report_test=REPORT_TEST,
+)
 
-            self.model.to(self.device)
-            self.ema = ModelEMA(self.model)
+# =====================
+# PRUNED TRAINER
+# =====================
 
-            # Recreate optimizer/scheduler
-            weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs
-            iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
-            self.optimizer = self.build_optimizer(
-                model=self.model,
-                name=self.args.optimizer,
-                lr=self.args.lr0,
-                momentum=self.args.momentum,
-                decay=weight_decay,
-                iterations=iterations,
-            )
-            self._setup_scheduler()
-            LOGGER.info("Applied ModelOpt FastNAS pruning")
+model = YOLO(base_best)
 
-        def final_eval(self):
-            """Override Ultralytics final_eval to avoid AutoBackend + ModelOpt restore crashes.
 
-            Ultralytics default final_eval reloads self.best (best.pt) via AutoBackend.
-            If the checkpoint contains `modelopt_state`, AutoBackend triggers ModelOpt restore and may crash.
-            We instead strip `modelopt_state` into best_clean.pt and validate that file.
-            """
+class PrunedTrainer(model.task_map[model.task]["trainer"]):
+    def _setup_train(self):
+        super()._setup_train()
+
+        def collect_func(batch):
+            return self.preprocess_batch(batch)["img"]
+
+        def score_func(m):
+            m.eval()
+            self.validator.args.save = False
+            self.validator.args.plots = False
+            self.validator.args.verbose = False
+            self.validator.args.data = DATA_YAML
+            metrics = self.validator(model=m)
+            self.validator.args.save = self.args.save
+            self.validator.args.plots = self.args.plots
+            self.validator.args.verbose = self.args.verbose
+            self.validator.args.data = self.args.data
+            return metrics["fitness"]
+
+        prune_constraints = {"flops": FLOPS_TARGET}
+
+        # disable fusing checks
+        self.model.is_fused = lambda: True
+
+        # Remove stale search checkpoint (Torch 2.6 weights_only can break unpickling)
+        if os.path.exists(SEARCH_CKPT):
             try:
-                best_path = str(getattr(self, "best", "") or "")
-                if not best_path or not os.path.exists(best_path):
-                    return
-
-                # Write a clean copy next to best.pt
-                best_dir = os.path.dirname(best_path)
-                clean_path = os.path.join(best_dir, "best_clean.pt")
-                clean_path = strip_modelopt_state(best_path, clean_path)
-
-                # Run validation on the clean checkpoint
-                self.metrics = self.validator(model=clean_path)
-                if hasattr(self, "fitness") and isinstance(self.metrics, dict) and "fitness" in self.metrics:
-                    self.fitness = self.metrics["fitness"]
+                os.remove(SEARCH_CKPT)
+                print(f"[ModelOpt] Removed stale search checkpoint: {SEARCH_CKPT}")
             except Exception as e:
-                print(f"[WARN] final_eval skipped due to error: {e}")
-                return
+                print(f"[WARN] Could not remove {SEARCH_CKPT}: {e}")
 
-    return PrunedTrainer
+        self.model, _ = mtp.prune(
+            model=self.model,
+            mode="fastnas",
+            constraints=prune_constraints,
+            dummy_input=torch.randn(1, 3, self.args.imgsz, self.args.imgsz).to(self.device),
+            config={
+                "score_func": score_func,
+                "checkpoint": SEARCH_CKPT,
+                "data_loader": self.train_loader,
+                "collect_func": collect_func,
+                "max_iter_data_loader": 20,
+            },
+        )
 
+        self.model.to(self.device)
+        self.ema = ModelEMA(self.model)
 
-# ---------------------------
-# Stages
-# ---------------------------
-
-def train_baseline(args) -> str:
-    print("\n==============================")
-    print("STAGE 1: Train baseline from scratch")
-    print("==============================\n")
-    print(f"[DEBUG] CWD: {os.getcwd()}")
-    print(f"[DEBUG] data.yaml (abs): {os.path.abspath(args.data)}")
-
-    y = YOLO(args.model)
-    results = y.train(
-        data=args.data,
-        epochs=args.epochs,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        workers=args.workers,
-        device=args.device,
-        project=args.project,
-        name=args.name_baseline,
-        pretrained=True,
-        exist_ok=True,
-        optimizer="auto",
-        val=False,
-        seed=0,
-    )
-
-    save_dir = getattr(results, "save_dir", None) or (Path(args.project) / args.name_baseline)
-    best_pt = os.path.join(str(save_dir), "weights", "best.pt")
-    last_pt = os.path.join(str(save_dir), "weights", "last.pt")
-    if not os.path.exists(best_pt) and os.path.exists(last_pt):
-        best_pt = last_pt
-
-    print(f"[INFO] Baseline save_dir: {save_dir}")
-    print(f"[INFO] Baseline best_pt:  {best_pt}")
-
-    best_clean_pt = strip_modelopt_state(best_pt, os.path.join(str(save_dir), "weights", "best_clean.pt"))
-    y_eval = YOLO(best_clean_pt)
-    try:
-        y_eval.fuse()
-    except Exception:
-        pass
-
-    report_metrics(
-        y_eval,
-        best_clean_pt,
-        "METRICS (BASELINE BEST)",
-        imgsz=args.imgsz,
-        power_w=args.power_w,
-        e_mac=args.e_mac,
-        data_yaml=args.data,
-        report_test=args.report_test,
-    )
-
-    return best_pt
+        # Recreate optimizer and scheduler
+        weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs
+        iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
+        self.optimizer = self.build_optimizer(
+            model=self.model,
+            name=self.args.optimizer,
+            lr=self.args.lr0,
+            momentum=self.args.momentum,
+            decay=weight_decay,
+            iterations=iterations,
+        )
+        self._setup_scheduler()
+        LOGGER.info("Applied pruning")
 
 
-def prune_and_finetune(args, baseline_best: str) -> str:
-    print("\n==============================")
-    print("STAGE 2: Prune (FastNAS) + fine-tune")
-    print("==============================\n")
-
-    y = YOLO(baseline_best)
-    base_trainer_cls = y.task_map[y.task]["trainer"]
-    PrunedTrainer = make_pruned_trainer(base_trainer_cls, data_yaml=args.data, flops_target=args.flops_target)
-
-    results = y.train(
-        data=args.data,
-        epochs=args.ft_epochs,
-        imgsz=args.imgsz,
-        batch=args.batch,
-        workers=args.workers,
-        device=args.device,
-        project=args.project,
-        name=args.name_pruned,
-        trainer=PrunedTrainer,
-        pretrained=True,
-        exist_ok=True,
-        optimizer="auto",
-        val=False,
-        seed=0,
-    )
-
-    save_dir = getattr(results, "save_dir", None) or (Path(args.project) / args.name_pruned)
-    best_pt = os.path.join(str(save_dir), "weights", "best.pt")
-    last_pt = os.path.join(str(save_dir), "weights", "last.pt")
-    if not os.path.exists(best_pt) and os.path.exists(last_pt):
-        best_pt = last_pt
-
-    print(f"[INFO] Pruned save_dir: {save_dir}")
-    print(f"[INFO] Pruned best_pt:  {best_pt}")
-
-    best_clean_pt = strip_modelopt_state(best_pt, os.path.join(str(save_dir), "weights", "best_clean.pt"))
-    y_eval = YOLO(best_clean_pt)
-    try:
-        y_eval.fuse()
-    except Exception:
-        pass
-
-    report_metrics(
-        y_eval,
-        best_clean_pt,
-        "METRICS (PRUNED BEST)",
-        imgsz=args.imgsz,
-        power_w=args.power_w,
-        e_mac=args.e_mac,
-        data_yaml=args.data,
-        report_test=args.report_test,
-    )
-
-    return best_pt
+# =====================
+# RUN
+# =====================
 
 
-# ---------------------------
-# CLI
-# ---------------------------
+# Train with pruning trainer
+results = model.train(
+    data=DATA_YAML,
+    trainer=PrunedTrainer,
+    epochs=EPOCHS_PRUNED,
+    imgsz=IMG_SIZE,
+    batch=BATCH,
+    device=DEVICE,
+    exist_ok=True,
+)
 
-def parse_args():
-    p = argparse.ArgumentParser()
+# Resolve best.pt path
+save_dir = getattr(results, "save_dir", None)
+if save_dir is None:
+    # best effort fallback
+    save_dir = Path("runs")
 
-    p.add_argument(
-        "--model",
-        type=str,
-        default="yolov8m.yaml",
-        help="Model config YAML to train from scratch (e.g., yolov8m.yaml, yolov11x.yaml)",
-    )
-    p.add_argument("--data", type=str, required=True, help="data.yaml")
+best_pt = os.path.join(str(save_dir), "weights", "best.pt")
+if not os.path.exists(best_pt):
+    # Ultralytics default often uses runs/detect/train*
+    # fall back to the latest run folder name in results if available
+    best_pt = os.path.join(str(save_dir), "weights", "last.pt")
 
-    p.add_argument("--imgsz", type=int, default=640)
-    p.add_argument("--epochs", type=int, default=100, help="baseline epochs (scratch)")
-    p.add_argument("--ft-epochs", type=int, default=50, help="fine-tune epochs after pruning")
-    p.add_argument("--batch", type=int, default=16)
-    p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--device", type=str, default="0")
+print(f"\n[INFO] Pruned training save_dir: {save_dir}")
+print(f"[INFO] Pruned best checkpoint:  {best_pt}")
 
-    p.add_argument("--flops-target", type=str, default="66%", help="FastNAS FLOPs target (e.g., 66%)")
-
-    p.add_argument("--power-w", type=float, default=6.05, help="Measured power in Watts")
-    p.add_argument("--e-mac", type=float, default=4.6e-12, help="Joules per MAC (paper constant)")
-
-    p.add_argument("--project", type=str, default="runs/modelopt")
-    p.add_argument("--name-baseline", type=str, default="baseline_scratch")
-    p.add_argument("--name-pruned", type=str, default="pruned_finetune")
-
-    p.add_argument("--report-test", action="store_true", help="Also compute and print mAP on split='test'")
-
-    return p.parse_args()
-
-
-def main():
-    args = parse_args()
-    baseline_best = train_baseline(args)
-    prune_and_finetune(args, baseline_best)
-
-
-if __name__ == "__main__":
-    main()
+# PRUNED metrics
+pruned_model = YOLO(best_pt)
+report_metrics(
+    pruned_model,
+    best_pt,
+    "METRICS (PRUNED MODEL - AFTER PRUNING)",
+    imgsz=IMG_SIZE,
+    power_w=POWER_W,
+    e_mac=E_MAC,
+    data_yaml=DATA_YAML,
+    report_test=REPORT_TEST,
+)
