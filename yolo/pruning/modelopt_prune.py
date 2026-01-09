@@ -415,6 +415,31 @@ def make_pruned_trainer(base_trainer_cls, data_yaml: str, flops_target: str):
             self._setup_scheduler()
             LOGGER.info("Applied ModelOpt FastNAS pruning")
 
+        def final_eval(self):
+            """Override Ultralytics final_eval to avoid AutoBackend + ModelOpt restore crashes.
+
+            Ultralytics default final_eval reloads self.best (best.pt) via AutoBackend.
+            If the checkpoint contains `modelopt_state`, AutoBackend triggers ModelOpt restore and may crash.
+            We instead strip `modelopt_state` into best_clean.pt and validate that file.
+            """
+            try:
+                best_path = str(getattr(self, "best", "") or "")
+                if not best_path or not os.path.exists(best_path):
+                    return
+
+                # Write a clean copy next to best.pt
+                best_dir = os.path.dirname(best_path)
+                clean_path = os.path.join(best_dir, "best_clean.pt")
+                clean_path = strip_modelopt_state(best_path, clean_path)
+
+                # Run validation on the clean checkpoint
+                self.metrics = self.validator(model=clean_path)
+                if hasattr(self, "fitness") and isinstance(self.metrics, dict) and "fitness" in self.metrics:
+                    self.fitness = self.metrics["fitness"]
+            except Exception as e:
+                print(f"[WARN] final_eval skipped due to error: {e}")
+                return
+
     return PrunedTrainer
 
 
