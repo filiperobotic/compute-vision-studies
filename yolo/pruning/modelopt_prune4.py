@@ -331,17 +331,6 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
 # RUN
 # =====================
 
-# ORIGINAL metrics (before pruning)
-report_metrics(
-    YOLO(ORIGINAL_MODEL_SRC),
-    ORIGINAL_MODEL_SRC if os.path.exists(ORIGINAL_MODEL_SRC) else None,
-    "METRICS (ORIGINAL MODEL)",
-    imgsz=IMG_SIZE,
-    power_w=POWER_W,
-    e_mac=E_MAC,
-    data_yaml=DATA_YAML,
-    report_test=REPORT_TEST,
-)
 
 # Train with pruning trainer
 results = model.train(
