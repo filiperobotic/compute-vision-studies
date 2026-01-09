@@ -37,7 +37,7 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
     prune_constraints = {"flops": "66%"}  # prune to 66% of original FLOPs
 
     self.model.is_fused = lambda: True  # disable fusing
-w
+
     ckpt_path = "modelopt_fastnas_search_checkpoint.pth"
     if os.path.exists(ckpt_path):
         os.remove(ckpt_path)
