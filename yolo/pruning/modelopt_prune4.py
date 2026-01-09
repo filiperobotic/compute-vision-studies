@@ -24,7 +24,7 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
         self.validator.args.save = False
         self.validator.args.plots = False
         self.validator.args.verbose = False
-        self.validator.args.data = "coco128.yaml"
+        self.validator.args.data = "./data.yaml"
         metrics = self.validator(model=model)
         self.validator.args.save = self.args.save
         self.validator.args.plots = self.args.plots
