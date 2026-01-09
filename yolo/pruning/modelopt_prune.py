@@ -53,7 +53,36 @@ from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from ultralytics.utils.torch_utils import ModelEMA, model_info
 
+
 import modelopt.torch.prune as mtp
+
+# ---------------------------
+# Workaround: allow re-loading ModelOpt checkpoints even if subnet_config keys drift
+# (Ultralytics AutoBackend -> load_checkpoint -> restore_from_modelopt_state)
+# The error looks like: "Inconsistent keys in config ... set strict=False".
+# We patch restore_from_modelopt_state to default to strict=False when supported.
+# ---------------------------
+try:
+    import modelopt.torch.opt.conversion as mto  # noqa: WPS433
+
+    if hasattr(mto, "restore_from_modelopt_state"):
+        _orig_restore_from_modelopt_state = mto.restore_from_modelopt_state
+
+        def _restore_from_modelopt_state_patched(model, modelopt_state, *args, **kwargs):
+            # Prefer non-strict restore to avoid crashes due to minor key mismatches.
+            if "strict" not in kwargs:
+                kwargs["strict"] = False
+            try:
+                return _orig_restore_from_modelopt_state(model, modelopt_state, *args, **kwargs)
+            except TypeError:
+                # Older signatures may not accept strict; retry without it.
+                kwargs.pop("strict", None)
+                return _orig_restore_from_modelopt_state(model, modelopt_state, *args, **kwargs)
+
+        mto.restore_from_modelopt_state = _restore_from_modelopt_state_patched
+        print("[INFO] Patched modelopt.torch.opt.conversion.restore_from_modelopt_state(strict=False)")
+except Exception as _e:
+    print(f"[WARN] Could not patch ModelOpt restore_from_modelopt_state: {_e}")
 
 
 # ---------------------------
