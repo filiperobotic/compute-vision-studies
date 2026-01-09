@@ -61,9 +61,9 @@ try:
         _orig_restore_from_modelopt_state = mto.restore_from_modelopt_state
 
         def _restore_from_modelopt_state_patched(model, modelopt_state, *args, **kwargs):
-            # Prefer non-strict restore to avoid crashes due to minor key mismatches.
-            if "strict" not in kwargs:
-                kwargs["strict"] = False
+            # Always force non-strict restore to avoid crashes due to minor key mismatches.
+            # Ultralytics may pass strict=True explicitly, so we override it.
+            kwargs["strict"] = False
             try:
                 return _orig_restore_from_modelopt_state(model, modelopt_state, *args, **kwargs)
             except TypeError:
@@ -106,7 +106,9 @@ def strip_modelopt_state(in_path: str, out_path: str) -> str:
     if not in_path or not os.path.exists(in_path):
         return in_path
     try:
-        ckpt = torch.load(in_path, map_location="cpu")
+        # PyTorch 2.6 defaults to weights_only=True, which fails for Ultralytics checkpoints.
+        # We are stripping metadata from our *own* checkpoints, so loading the full object is OK.
+        ckpt = torch.load(in_path, map_location="cpu", weights_only=False)
         if isinstance(ckpt, dict) and "modelopt_state" in ckpt:
             ckpt = dict(ckpt)  # shallow copy
             ckpt.pop("modelopt_state", None)
@@ -127,6 +129,13 @@ try:
     if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
         torch.serialization.add_safe_globals([defaultdict])
         print("[INFO] Added safe global: collections.defaultdict")
+        # Allowlist Ultralytics model class for weights_only unpickling (PyTorch 2.6).
+        try:
+            from ultralytics.nn.tasks import DetectionModel  # noqa: WPS433
+            torch.serialization.add_safe_globals([DetectionModel])
+            print("[INFO] Added safe global: ultralytics.nn.tasks.DetectionModel")
+        except Exception as _e:
+            print(f"[WARN] Could not add_safe_globals([DetectionModel]): {_e}")
 except Exception as e:
     print(f"[WARN] Could not add_safe_globals([defaultdict]): {e}")
 
