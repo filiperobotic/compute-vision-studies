@@ -49,18 +49,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from ultralytics import YOLO
-from ultralytics.utils import LOGGER
-from ultralytics.utils.torch_utils import ModelEMA, model_info
-
-
-import modelopt.torch.prune as mtp
-
 # ---------------------------
 # Workaround: allow re-loading ModelOpt checkpoints even if subnet_config keys drift
-# (Ultralytics AutoBackend -> load_checkpoint -> restore_from_modelopt_state)
-# The error looks like: "Inconsistent keys in config ... set strict=False".
-# We patch restore_from_modelopt_state to default to strict=False when supported.
+# IMPORTANT: must run BEFORE importing Ultralytics because Ultralytics may cache the restore fn.
+# Error looks like: "Inconsistent keys in config ... set strict=False".
 # ---------------------------
 try:
     import modelopt.torch.opt.conversion as mto  # noqa: WPS433
@@ -80,9 +72,24 @@ try:
                 return _orig_restore_from_modelopt_state(model, modelopt_state, *args, **kwargs)
 
         mto.restore_from_modelopt_state = _restore_from_modelopt_state_patched
-        print("[INFO] Patched modelopt.torch.opt.conversion.restore_from_modelopt_state(strict=False)")
+        print("[INFO] Patched modelopt.torch.opt.conversion.restore_from_modelopt_state(strict=False) [early]")
 except Exception as _e:
-    print(f"[WARN] Could not patch ModelOpt restore_from_modelopt_state: {_e}")
+    print(f"[WARN] Could not patch ModelOpt restore_from_modelopt_state [early]: {_e}")
+
+from ultralytics import YOLO
+from ultralytics.utils import LOGGER
+from ultralytics.utils.torch_utils import ModelEMA, model_info
+
+# Patch any cached reference inside Ultralytics (if it imported conversion earlier)
+try:
+    import ultralytics.nn.tasks as _tasks  # noqa: WPS433
+    if hasattr(_tasks, "mto") and hasattr(_tasks.mto, "restore_from_modelopt_state"):
+        _tasks.mto.restore_from_modelopt_state = mto.restore_from_modelopt_state
+        print("[INFO] Patched ultralytics.nn.tasks.mto.restore_from_modelopt_state -> strict=False wrapper")
+except Exception as _e:
+    print(f"[WARN] Could not patch Ultralytics cached ModelOpt restore: {_e}")
+
+import modelopt.torch.prune as mtp
 
 
 # ---------------------------
