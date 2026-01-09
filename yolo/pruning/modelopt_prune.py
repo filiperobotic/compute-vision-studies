@@ -89,7 +89,35 @@ try:
 except Exception as _e:
     print(f"[WARN] Could not patch Ultralytics cached ModelOpt restore: {_e}")
 
+
 import modelopt.torch.prune as mtp
+
+# ---------------------------
+# Checkpoint helper
+# ---------------------------
+
+def strip_modelopt_state(in_path: str, out_path: str) -> str:
+    """Save a copy of a YOLO checkpoint without ModelOpt metadata.
+
+    Ultralytics will try to call ModelOpt restore if `modelopt_state` exists in the checkpoint.
+    For already-materialized pruned models, this restore can fail due to subnet_config mismatches.
+    Removing the key makes the checkpoint load like a normal YOLO checkpoint.
+    """
+    if not in_path or not os.path.exists(in_path):
+        return in_path
+    try:
+        ckpt = torch.load(in_path, map_location="cpu")
+        if isinstance(ckpt, dict) and "modelopt_state" in ckpt:
+            ckpt = dict(ckpt)  # shallow copy
+            ckpt.pop("modelopt_state", None)
+            ckpt.pop("modelopt_metadata", None)
+            ckpt.pop("modelopt_version", None)
+            torch.save(ckpt, out_path)
+            print(f"[INFO] Wrote clean checkpoint without modelopt_state: {out_path}")
+            return out_path
+    except Exception as e:
+        print(f"[WARN] Could not strip modelopt_state from {in_path}: {e}")
+    return in_path
 
 
 # ---------------------------
@@ -405,6 +433,7 @@ def train_baseline(args) -> str:
         pretrained=True,
         exist_ok=True,
         optimizer="auto",
+        val=False,
         seed=0,
     )
 
@@ -417,7 +446,8 @@ def train_baseline(args) -> str:
     print(f"[INFO] Baseline save_dir: {save_dir}")
     print(f"[INFO] Baseline best_pt:  {best_pt}")
 
-    y_eval = YOLO(best_pt)
+    best_clean_pt = strip_modelopt_state(best_pt, os.path.join(str(save_dir), "weights", "best_clean.pt"))
+    y_eval = YOLO(best_clean_pt)
     try:
         y_eval.fuse()
     except Exception:
@@ -425,7 +455,7 @@ def train_baseline(args) -> str:
 
     report_metrics(
         y_eval,
-        best_pt,
+        best_clean_pt,
         "METRICS (BASELINE BEST)",
         imgsz=args.imgsz,
         power_w=args.power_w,
@@ -459,6 +489,7 @@ def prune_and_finetune(args, baseline_best: str) -> str:
         pretrained=True,
         exist_ok=True,
         optimizer="auto",
+        val=False,
         seed=0,
     )
 
@@ -471,7 +502,8 @@ def prune_and_finetune(args, baseline_best: str) -> str:
     print(f"[INFO] Pruned save_dir: {save_dir}")
     print(f"[INFO] Pruned best_pt:  {best_pt}")
 
-    y_eval = YOLO(best_pt)
+    best_clean_pt = strip_modelopt_state(best_pt, os.path.join(str(save_dir), "weights", "best_clean.pt"))
+    y_eval = YOLO(best_clean_pt)
     try:
         y_eval.fuse()
     except Exception:
@@ -479,7 +511,7 @@ def prune_and_finetune(args, baseline_best: str) -> str:
 
     report_metrics(
         y_eval,
-        best_pt,
+        best_clean_pt,
         "METRICS (PRUNED BEST)",
         imgsz=args.imgsz,
         power_w=args.power_w,
