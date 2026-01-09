@@ -1,5 +1,6 @@
 from ultralytics import YOLO
 import modelopt.torch.prune as mtp
+import os
 
 model = YOLO("yolov8m.pt")
 
@@ -37,6 +38,10 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
 
     self.model.is_fused = lambda: True  # disable fusing
 
+    ckpt_path = "modelopt_fastnas_search_checkpoint.pth"
+    if os.path.exists(ckpt_path):
+        os.remove(ckpt_path)
+w
     self.model, prune_res = mtp.prune(
         model=self.model,
         mode="fastnas",
@@ -44,7 +49,8 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
         dummy_input=torch.randn(1, 3, self.args.imgsz, self.args.imgsz).to(self.device),
         config={
             "score_func": score_func,  # scoring function
-            "checkpoint": "modelopt_fastnas_search_checkpoint.pth",  # saves checkpoint during subnet search
+            # "checkpoint": "modelopt_fastnas_search_checkpoint.pth",  # saves checkpoint during subnet search
+            "checkpoint": ckpt_path,  # saves checkpoint during subnet search
             "data_loader": self.train_loader,  # training dataloader
             "collect_func": collect_func,  # preprocessing function
             "max_iter_data_loader": 20,  # 50 is recommended, but requires more RAM
