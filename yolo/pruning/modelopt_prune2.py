@@ -90,8 +90,14 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
     self._setup_scheduler()
     LOGGER.info("Applied pruning")
 
+  def final_eval(self):
+    # Disable Ultralytics final_eval for ModelOpt-pruned runs.
+    # final_eval reloads best.pt via AutoBackend, which triggers ModelOpt restore and can crash
+    # with "Inconsistent keys in config".
+    return
 
-results = model.train(data="./data.yaml", trainer=PrunedTrainer, epochs=50, exist_ok=True, warmup_epochs=0)
+
+results = model.train(data="./data.yaml", trainer=PrunedTrainer, epochs=50, exist_ok=True, warmup_epochs=0, val=False)
 
 pruned_model = YOLO("runs/detect/train/weights/best.pt")
 
