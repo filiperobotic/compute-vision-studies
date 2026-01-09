@@ -1,3 +1,17 @@
+import os
+from collections import defaultdict
+import torch
+
+# PyTorch 2.6 changed torch.load default to weights_only=True.
+# ModelOpt FastNAS search checkpoints may contain pickled objects like collections.defaultdict.
+# Allowlist it so weights_only unpickling succeeds.
+try:
+    if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
+        torch.serialization.add_safe_globals([defaultdict])
+        print("[INFO] Added safe global: collections.defaultdict")
+except Exception as e:
+    print(f"[WARN] Could not add_safe_globals([defaultdict]): {e}")
+
 from ultralytics import YOLO
 import modelopt.torch.prune as mtp
 
@@ -34,6 +48,14 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
 
     prune_constraints = {"flops": "66%"}  # prune to 66% of original FLOPs
 
+    ckpt_path = "modelopt_fastnas_search_checkpoint.pth"
+    if os.path.exists(ckpt_path):
+        print(f"[ModelOpt] Removing existing search checkpoint: {ckpt_path}")
+        try:
+            os.remove(ckpt_path)
+        except Exception as e:
+            print(f"[WARN] Could not remove {ckpt_path}: {e}")
+
     self.model.is_fused = lambda: True  # disable fusing
 
     self.model, prune_res = mtp.prune(
@@ -43,7 +65,7 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
         dummy_input=torch.randn(1, 3, self.args.imgsz, self.args.imgsz).to(self.device),
         config={
             "score_func": score_func,  # scoring function
-            "checkpoint": "modelopt_fastnas_search_checkpoint.pth",  # saves checkpoint during subnet search
+            "checkpoint": ckpt_path,  # saves checkpoint during subnet search
             "data_loader": self.train_loader,  # training dataloader
             "collect_func": collect_func,  # preprocessing function
             "max_iter_data_loader": 20,  # 50 is recommended, but requires more RAM
