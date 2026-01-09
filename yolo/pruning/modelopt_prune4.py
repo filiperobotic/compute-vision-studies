@@ -38,7 +38,7 @@ E_MAC = 4.6e-12     # Joules per MAC (paper constant)
 REPORT_TEST = True  # try to also print TEST mAP, if data.yaml has `test:`
 
 # Models
-ORIGINAL_MODEL_SRC = "yolov8m.pt"  # change to yolo11x.pt if you want
+ORIGINAL_MODEL_SRC = "yolov10x.pt"  # change to yolo11x.pt if you want
 
 # Pruning
 FLOPS_TARGET = "66%"
