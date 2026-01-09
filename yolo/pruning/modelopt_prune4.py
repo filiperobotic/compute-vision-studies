@@ -23,7 +23,12 @@ import modelopt.torch.prune as mtp
 # =====================
 DATA_YAML = "./data.yaml"
 IMG_SIZE = 640
-EPOCHS = 50
+BATCH = 16
+DEVICE = 0
+
+# Split epochs for baseline and pruning fine-tuning
+EPOCHS_BASELINE = 100   # train original model
+EPOCHS_PRUNED = 50      # fine-tune after pruning
 BATCH = 16
 DEVICE = 0
 
@@ -256,10 +261,57 @@ def report_metrics(
 
 
 # =====================
+# STAGE 1: BASELINE TRAINING (ORIGINAL MODEL)
+# =====================
+
+print("\n" + "#" * 70)
+print("STAGE 1: Train baseline (original model)")
+print("#" * 70)
+
+baseline = YOLO(ORIGINAL_MODEL_SRC)
+res_base = baseline.train(
+    data=DATA_YAML,
+    epochs=EPOCHS_BASELINE,
+    imgsz=IMG_SIZE,
+    batch=BATCH,
+    device=DEVICE,
+    exist_ok=True,
+)
+
+base_dir = getattr(res_base, "save_dir", None)
+if base_dir is None:
+    base_dir = Path("runs")
+
+base_best = os.path.join(str(base_dir), "weights", "best.pt")
+base_last = os.path.join(str(base_dir), "weights", "last.pt")
+if not os.path.exists(base_best) and os.path.exists(base_last):
+    base_best = base_last
+
+print(f"[INFO] Baseline save_dir: {base_dir}")
+print(f"[INFO] Baseline best checkpoint: {base_best}")
+
+baseline_best_model = YOLO(base_best)
+try:
+    baseline_best_model.fuse()
+except Exception:
+    pass
+
+report_metrics(
+    baseline_best_model,
+    base_best,
+    "METRICS (BASELINE TRAINED - BEFORE PRUNING)",
+    imgsz=IMG_SIZE,
+    power_w=POWER_W,
+    e_mac=E_MAC,
+    data_yaml=DATA_YAML,
+    report_test=REPORT_TEST,
+)
+
+# =====================
 # PRUNED TRAINER
 # =====================
 
-model = YOLO(ORIGINAL_MODEL_SRC)
+model = YOLO(base_best)
 
 
 class PrunedTrainer(model.task_map[model.task]["trainer"]):
@@ -336,7 +388,7 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
 results = model.train(
     data=DATA_YAML,
     trainer=PrunedTrainer,
-    epochs=EPOCHS,
+    epochs=EPOCHS_PRUNED,
     imgsz=IMG_SIZE,
     batch=BATCH,
     device=DEVICE,
@@ -363,7 +415,7 @@ pruned_model = YOLO(best_pt)
 report_metrics(
     pruned_model,
     best_pt,
-    "METRICS (PRUNED MODEL - BEST)",
+    "METRICS (PRUNED MODEL - AFTER PRUNING)",
     imgsz=IMG_SIZE,
     power_w=POWER_W,
     e_mac=E_MAC,
