@@ -1,3 +1,39 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Train-from-scratch -> ModelOpt FastNAS prune -> fine-tune, with detailed metrics.
+
+Stages:
+  1) Train baseline from scratch (pretrained=True).
+  2) Apply ModelOpt FastNAS pruning to reach a FLOPs target (%).
+  3) Fine-tune the pruned model.
+
+Reported metrics (baseline + pruned):
+- mAP50 / mAP50-95 on VAL split
+- mAP50 / mAP50-95 on TEST split (if present)
+- Params (M)
+- GFLOPs (imgsz)
+- MACs (G)
+- Analytical energy (J/img, mJ/img) using E_MAC
+- Forward-only inference time (ms/img)
+- Joules/img using POWER_W
+- Peak GPU memory (MB)
+- Checkpoint size (MB)
+- StateDict size (MB): native dtypes, fp32-cast, fp16-cast (fair size comparison)
+
+Usage example:
+  python -m yolo.pruning.modelopt_prune4 \
+    --model yolo11x.pt \
+    --data data.yaml \
+    --imgsz 640 \
+    --epochs 100 \
+    --ft-epochs 50 \
+    --flops-target 66% \
+    --power-w 6.05 \
+    --e-mac 4.6e-12 \
+    --report-test
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -18,156 +54,6 @@ from ultralytics.utils import LOGGER
 from ultralytics.utils.torch_utils import ModelEMA, model_info
 
 import modelopt.torch.prune as mtp
-from ultralytics import YOLO
-import modelopt.torch.prune as mtp
-from ultralytics.utils import LOGGER
-from ultralytics.utils.torch_utils import ModelEMA
-from ultralytics import YOLO
-from collections import OrderedDict, defaultdict
-import torch
-import math
-import os
-
-model = YOLO("yolov8m.pt")
-
-# PyTorch 2.6 sets torch.load(weights_only=True) by default, which can break unpickling of
-# ModelOpt search checkpoints that contain objects like collections.defaultdict.
-# We explicitly allowlist defaultdict (safe if the checkpoint is local/trusted).
-try:
-    if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
-        torch.serialization.add_safe_globals([defaultdict])
-        print("[INFO] Added safe global: collections.defaultdict")
-except Exception as e:
-    print(f"[WARN] Could not add_safe_globals([defaultdict]): {e}")
-
-class PrunedTrainer(model.task_map[model.task]["trainer"]):
-  def _setup_train(self):
-    """Modified setup model that adds distillation wrapper."""
-    
-
-    super()._setup_train()
-
-    def collect_func(batch):
-        return self.preprocess_batch(batch)["img"]
-
-    def score_func(model):
-        # Disable logs
-        model.eval()
-        self.validator.args.save = False
-        self.validator.args.plots = False
-        self.validator.args.verbose = False
-        self.validator.args.data = "data.yaml"
-        metrics = self.validator(model=model)
-        self.validator.args.save = self.args.save
-        self.validator.args.plots = self.args.plots
-        self.validator.args.verbose = self.args.verbose
-        self.validator.args.data = self.args.data
-        return metrics["fitness"]
-
-    # Use a versioned checkpoint name to avoid loading stale/incompatible checkpoints
-    ckpt_name = f"modelopt_fastnas_search_checkpoint_torch{torch.__version__.split('+')[0]}.pth"
-    if os.path.exists(ckpt_name):
-        print(f"[ModelOpt] Removing existing search checkpoint (may be incompatible): {ckpt_name}")
-        try:
-            os.remove(ckpt_name)
-        except Exception as e:
-            print(f"[WARN] Could not remove {ckpt_name}: {e}")
-
-    prune_constraints = {"flops": "66%"}  # prune to 66% of original FLOPs
-
-    self.model.is_fused = lambda: True  # disable fusing
-
-    self.model, prune_res = mtp.prune(
-        model=self.model,
-        mode="fastnas",
-        constraints=prune_constraints,
-        dummy_input=torch.randn(1, 3, self.args.imgsz, self.args.imgsz).to(self.device),
-        config={
-            "score_func": score_func,  # scoring function
-            "checkpoint": ckpt_name,  # saves checkpoint during subnet search
-            "data_loader": self.train_loader,  # training dataloader
-            "collect_func": collect_func,  # preprocessing function
-            "max_iter_data_loader": 20,  # 50 is recommended, but requires more RAM
-        },
-    )
-
-    self.model.to(self.device)
-    # Recreate EMA
-    self.ema = ModelEMA(self.model)
-
-    # Recreate optimizer and scheduler
-    weight_decay = self.args.weight_decay * self.batch_size * self.accumulate / self.args.nbs  # scale weight_decay
-    iterations = math.ceil(len(self.train_loader.dataset) / max(self.batch_size, self.args.nbs)) * self.epochs
-    self.optimizer = self.build_optimizer(
-    model=self.model,
-    name=self.args.optimizer,
-    lr=self.args.lr0,
-    momentum=self.args.momentum,
-    decay=weight_decay,
-    iterations=iterations,
-    )
-    self._setup_scheduler()
-    LOGGER.info("Applied pruning")
-
-results = model.train(data="data.yaml", trainer=PrunedTrainer, epochs=50, exist_ok=True, warmup_epochs=0)
-pruned_model = YOLO("runs/detect/train/weights/best.pt")
-
-# Original FLOPs
-model = YOLO("yolov8m.pt")
-model.info()
-
-# Pruned FLOPs
-pruned_model.info()
-
-results = pruned_model.val(data="data.yaml", verbose=False, rect=False)
-
-pruned_model.export(format="engine", half=True)
-pruned_model = YOLO("runs/detect/train/weights/best.engine")
-results = pruned_model.val(data="data.yaml", verbose=False)
-
-model = YOLO("yolov8m.pt")
-model.export(format="engine", half=True)
-model = YOLO("yolov8m.engine")
-
-results = model.val(data="data.yaml", verbose=False)
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""Train-from-scratch -> ModelOpt FastNAS prune -> fine-tune, with detailed metrics.
-
-What this script does:
-  Stage A) Train baseline from scratch (pretrained=False) using Ultralytics.
-  Stage B) Load baseline best.pt and run FastNAS pruning (ModelOpt) to a FLOPs target.
-  Stage C) Fine-tune the pruned model.
-
-It reports (same style as before):
-- mAP50 and mAP50-95
-- Params (M)
-- GFLOPs (imgsz)
-- MACs (G)
-- Analytical energy (J/img, mJ/img) using E_MAC
-- Forward-only inference time (ms/img)
-- Joules/img using POWER_W
-- Peak GPU memory (MB)
-- Checkpoint size (MB)
-
-Requirements:
-- ultralytics
-- nvidia-modelopt (modelopt.torch)
-- torch >= 2.6 (safe globals handled)
-
-Example:
-  python -m yolo.pruning.modelopt_prune3 \
-    --model yolov8m.yaml \
-    --data data.yaml \
-    --imgsz 640 \
-    --epochs 100 \
-    --ft-epochs 50 \
-    --flops-target 66% \
-    --power-w 6.05
-"""
-
-
 
 
 # ---------------------------
@@ -187,7 +73,6 @@ except Exception as e:
 
 def extract_gflops(yolo: YOLO, imgsz: int) -> float:
     """Return GFLOPs from Ultralytics model_info; fallback to parsing yolo.info output."""
-    # 1) model_info
     try:
         if isinstance(getattr(yolo, "model", None), nn.Module):
             info = model_info(yolo.model, verbose=False, imgsz=imgsz)
@@ -200,7 +85,6 @@ def extract_gflops(yolo: YOLO, imgsz: int) -> float:
     except Exception:
         pass
 
-    # 2) parse yolo.info() logs
     txt = ""
     try:
         from ultralytics.utils import LOGGER as _LOGGER
@@ -216,10 +100,7 @@ def extract_gflops(yolo: YOLO, imgsz: int) -> float:
             _LOGGER.removeHandler(handler)
         txt = buf.getvalue()
     except Exception:
-        # last resort: stdout capture
-        buf = io.StringIO()
-        with io.StringIO() as _:
-            pass
+        txt = ""
 
     m = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*GFLOPs", txt)
     if not m:
@@ -268,23 +149,96 @@ def measure_forward_only(yolo: YOLO, imgsz: int, bs: int = 1, warmup: int = 20, 
     return ms_per_img, sec_per_img, peak_mb
 
 
-def report_metrics(yolo: YOLO, weights_path: str, title: str, imgsz: int, power_w: float, e_mac: float):
+def state_dict_size_mb(yolo: YOLO, cast_dtype: torch.dtype | None = None) -> float | None:
+    """Compute true tensor payload size from state_dict (no pickle/zip overhead).
+
+    If cast_dtype is provided, floating tensors are virtually cast to that dtype for a fair comparison.
+    """
+    if not isinstance(getattr(yolo, "model", None), nn.Module):
+        return None
+
+    sd = yolo.model.state_dict()
+    total_bytes = 0
+    for _, t in sd.items():
+        if not torch.is_tensor(t):
+            continue
+        tt = t
+        if cast_dtype is not None and tt.is_floating_point():
+            # virtual cast for size estimate
+            if cast_dtype == torch.float16:
+                bpe = 2
+            elif cast_dtype == torch.float32:
+                bpe = 4
+            else:
+                bpe = torch.tensor([], dtype=cast_dtype).element_size()
+            total_bytes += tt.numel() * bpe
+        else:
+            total_bytes += tt.numel() * tt.element_size()
+    return total_bytes / 1e6
+
+
+def val_maps(yolo: YOLO, data_yaml: str, imgsz: int, split: str) -> tuple[float | None, float | None]:
+    """Return (mAP50, mAP50-95) for the given split. If split missing, returns (None, None)."""
+    try:
+        res = yolo.val(data=data_yaml, imgsz=imgsz, split=split, verbose=False, rect=False)
+        m50 = float(res.box.map50)
+        mmap = float(res.box.map)
+        return m50, mmap
+    except Exception as e:
+        print(f"[WARN] Could not run .val(split='{split}'): {e}")
+        return None, None
+
+
+def report_metrics(
+    yolo: YOLO,
+    weights_path: str,
+    title: str,
+    imgsz: int,
+    power_w: float,
+    e_mac: float,
+    data_yaml: str,
+    report_test: bool,
+):
     print("=" * 70)
     print(title)
     print("=" * 70)
 
-    # params
+    # mAP val/test
+    m50_v, mmap_v = val_maps(yolo, data_yaml=data_yaml, imgsz=imgsz, split="val")
+    if m50_v is not None:
+        print(f"VAL mAP50: {m50_v:.4f}")
+        print(f"VAL mAP50-95: {mmap_v:.4f}")
+
+    if report_test:
+        m50_t, mmap_t = val_maps(yolo, data_yaml=data_yaml, imgsz=imgsz, split="test")
+        if m50_t is not None:
+            print(f"TEST mAP50: {m50_t:.4f}")
+            print(f"TEST mAP50-95: {mmap_t:.4f}")
+
+    # params and dtype snapshot + fair sizes
     try:
         if isinstance(getattr(yolo, "model", None), nn.Module):
-            n_params = sum(p.numel() for p in yolo.model.parameters())
+            params = list(yolo.model.parameters())
+            n_params = sum(p.numel() for p in params)
+            dtypes = [p.dtype for p in params]
+            fp16 = sum(1 for dt in dtypes if dt == torch.float16)
+            fp32 = sum(1 for dt in dtypes if dt == torch.float32)
             print(f"Params: {n_params} => {n_params/1e6:.6f} M")
-            # approximate weights size in MB (float32)
-            w_mb = (n_params * 4) / 1e6
-            print(f"Weights size (approx, fp32): {w_mb:.1f} MB")
-    except Exception as e:
-        print(f"[WARN] Could not count params: {e}")
+            print(f"Param dtypes: fp16={fp16}, fp32={fp32}, other={len(dtypes)-fp16-fp32}")
 
-    # gflops / macs / energy
+            native_mb = state_dict_size_mb(yolo, cast_dtype=None)
+            fp32_mb = state_dict_size_mb(yolo, cast_dtype=torch.float32)
+            fp16_mb = state_dict_size_mb(yolo, cast_dtype=torch.float16)
+            if native_mb is not None:
+                print(f"StateDict size (native dtypes): {native_mb:.1f} MB")
+            if fp32_mb is not None:
+                print(f"StateDict size (fp32 cast): {fp32_mb:.1f} MB")
+            if fp16_mb is not None:
+                print(f"StateDict size (fp16 cast): {fp16_mb:.1f} MB")
+    except Exception as e:
+        print(f"[WARN] Could not count params / state_dict sizes: {e}")
+
+    # gflops / macs / analytical energy
     try:
         gflops = extract_gflops(yolo, imgsz=imgsz)
         print(f"GFLOPs (imgsz={imgsz}): {gflops:.4f}")
@@ -307,27 +261,13 @@ def report_metrics(yolo: YOLO, weights_path: str, title: str, imgsz: int, power_
     else:
         print("[INFO] Forward-only timing skipped (non-torch backend).")
 
-    # file size
+    # file size on disk
     if weights_path and os.path.exists(weights_path):
         size_mb = os.path.getsize(weights_path) / 1e6
-        print(f"Checkpoint size: {size_mb:.1f} MB")
+        print(f"Checkpoint size (on disk): {size_mb:.1f} MB")
 
     print("=" * 70)
     print()
-
-
-def val_and_print_map(yolo: YOLO, data_yaml: str, imgsz: int, label: str):
-    try:
-        res = yolo.val(data=data_yaml, imgsz=imgsz, verbose=False, rect=False)
-        try:
-            print(f"{label} mAP50: {float(res.box.map50):.4f}")
-            print(f"{label} mAP50-95: {float(res.box.map):.4f}")
-        except Exception:
-            pass
-        return res
-    except Exception as e:
-        print(f"[WARN] Could not run {label} .val(): {e}")
-        return None
 
 
 # ---------------------------
@@ -343,8 +283,8 @@ def make_pruned_trainer(base_trainer_cls, data_yaml: str, flops_target: str):
                 return self.preprocess_batch(batch)["img"]
 
             def score_func(model: nn.Module):
-                # Disable logs
                 model.eval()
+                # Disable logs
                 self.validator.args.save = False
                 self.validator.args.plots = False
                 self.validator.args.verbose = False
@@ -413,6 +353,8 @@ def train_baseline(args) -> str:
     print("\n==============================")
     print("STAGE 1: Train baseline from scratch")
     print("==============================\n")
+    print(f"[DEBUG] CWD: {os.getcwd()}")
+    print(f"[DEBUG] data.yaml (abs): {os.path.abspath(args.data)}")
 
     y = YOLO(args.model)
     results = y.train(
@@ -424,9 +366,10 @@ def train_baseline(args) -> str:
         device=args.device,
         project=args.project,
         name=args.name_baseline,
-        pretrained=False,
+        pretrained=True,
         exist_ok=True,
-        warmup_epochs=0,
+        optimizer="auto",
+        seed=0,
     )
 
     save_dir = getattr(results, "save_dir", None) or (Path(args.project) / args.name_baseline)
@@ -443,8 +386,17 @@ def train_baseline(args) -> str:
         y_eval.fuse()
     except Exception:
         pass
-    report_metrics(y_eval, best_pt, "METRICS (BASELINE BEST)", imgsz=args.imgsz, power_w=args.power_w, e_mac=args.e_mac)
-    val_and_print_map(y_eval, args.data, imgsz=args.imgsz, label="Baseline")
+
+    report_metrics(
+        y_eval,
+        best_pt,
+        "METRICS (BASELINE BEST)",
+        imgsz=args.imgsz,
+        power_w=args.power_w,
+        e_mac=args.e_mac,
+        data_yaml=args.data,
+        report_test=args.report_test,
+    )
 
     return best_pt
 
@@ -468,8 +420,10 @@ def prune_and_finetune(args, baseline_best: str) -> str:
         project=args.project,
         name=args.name_pruned,
         trainer=PrunedTrainer,
+        pretrained=True,
         exist_ok=True,
-        warmup_epochs=0,
+        optimizer="auto",
+        seed=0,
     )
 
     save_dir = getattr(results, "save_dir", None) or (Path(args.project) / args.name_pruned)
@@ -486,8 +440,17 @@ def prune_and_finetune(args, baseline_best: str) -> str:
         y_eval.fuse()
     except Exception:
         pass
-    report_metrics(y_eval, best_pt, "METRICS (PRUNED BEST)", imgsz=args.imgsz, power_w=args.power_w, e_mac=args.e_mac)
-    val_and_print_map(y_eval, args.data, imgsz=args.imgsz, label="Pruned")
+
+    report_metrics(
+        y_eval,
+        best_pt,
+        "METRICS (PRUNED BEST)",
+        imgsz=args.imgsz,
+        power_w=args.power_w,
+        e_mac=args.e_mac,
+        data_yaml=args.data,
+        report_test=args.report_test,
+    )
 
     return best_pt
 
@@ -499,8 +462,12 @@ def prune_and_finetune(args, baseline_best: str) -> str:
 def parse_args():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--model", type=str, default="yolov8m.yaml",
-                   help="Model config YAML to train from scratch (e.g., yolov8m.yaml, yolov11x.yaml)")
+    p.add_argument(
+        "--model",
+        type=str,
+        default="yolov8m.yaml",
+        help="Model config YAML to train from scratch (e.g., yolov8m.yaml, yolov11x.yaml)",
+    )
     p.add_argument("--data", type=str, required=True, help="data.yaml")
 
     p.add_argument("--imgsz", type=int, default=640)
@@ -508,7 +475,7 @@ def parse_args():
     p.add_argument("--ft-epochs", type=int, default=50, help="fine-tune epochs after pruning")
     p.add_argument("--batch", type=int, default=16)
     p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--device", type=str, default=None)
+    p.add_argument("--device", type=str, default="0")
 
     p.add_argument("--flops-target", type=str, default="66%", help="FastNAS FLOPs target (e.g., 66%)")
 
@@ -518,6 +485,8 @@ def parse_args():
     p.add_argument("--project", type=str, default="runs/modelopt")
     p.add_argument("--name-baseline", type=str, default="baseline_scratch")
     p.add_argument("--name-pruned", type=str, default="pruned_finetune")
+
+    p.add_argument("--report-test", action="store_true", help="Also compute and print mAP on split='test'")
 
     return p.parse_args()
 
