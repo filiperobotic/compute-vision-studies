@@ -32,6 +32,7 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
         self.validator.args.data = self.args.data
         return metrics["fitness"]
 
+    import pdb; pdb.set_trace()
     prune_constraints = {"flops": "66%"}  # prune to 66% of original FLOPs
 
     self.model.is_fused = lambda: True  # disable fusing
@@ -68,7 +69,10 @@ class PrunedTrainer(model.task_map[model.task]["trainer"]):
     self._setup_scheduler()
     LOGGER.info("Applied pruning")
 
+
+
 results = model.train(data="./data.yaml", trainer=PrunedTrainer, epochs=50, exist_ok=True, warmup_epochs=0)
+import pdb; pdb.set_trace()
 
 pruned_model = YOLO("runs/detect/train/weights/best.pt")
 
